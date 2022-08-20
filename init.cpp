@@ -41,6 +41,7 @@
 #include "detailed_mem_params.h"
 #include "ddr_mem.h"
 #include "debug_zsim.h"
+#include "dramsim3_mem_ctrl.h"
 #include "dramsim_mem_ctrl.h"
 #include "event_queue.h"
 #include "filter_cache.h"
@@ -359,6 +360,11 @@ MemObject* BuildMemoryController(Config& config, uint32_t lineSize, uint32_t fre
         string outputDir = config.get<const char*>("sys.mem.outputDir");
         string traceName = config.get<const char*>("sys.mem.traceName");
         mem = new DRAMSimMemory(dramTechIni, dramSystemIni, outputDir, traceName, capacity, cpuFreqHz, latency, domain, name);
+    } else if (type == "DRAMsim3") {
+        int cpuFreqMHz = frequency;
+        string dramIni = config.get<const char*>("sys.mem.configIni");
+        string outputDir = config.get<const char*>("sys.mem.outputDir");
+        mem = new DRAMsim3Memory(dramIni, outputDir, cpuFreqMHz, domain, name);
     } else if (type == "Detailed") {
         // FIXME(dsm): Don't use a separate config file... see DDRMemory
         g_string mcfg = config.get<const char*>("sys.mem.paramFile", "");
