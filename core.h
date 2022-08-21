@@ -30,6 +30,7 @@
 #include "decoder.h"
 #include "g_std/g_string.h"
 #include "stats.h"
+#include "memory_hierarchy.h"
 
 struct BblInfo {
     uint32_t instrs;
@@ -41,13 +42,15 @@ struct BblInfo {
  * As an artifact of having a shared code cache, we need these to be the same for different core types.
  */
 struct InstrFuncPtrs {  // NOLINT(whitespace)
-    void (*loadPtr)(THREADID, ADDRINT);
-    void (*storePtr)(THREADID, ADDRINT);
+    void (*loadPtr)(THREADID, ADDRINT, UINT32);
+    void (*storePtr)(THREADID, ADDRINT, UINT32);
     void (*bblPtr)(THREADID, ADDRINT, BblInfo*);
     void (*branchPtr)(THREADID, ADDRINT, BOOL, ADDRINT, ADDRINT);
     // Same as load/store functions, but last arg indicated whether op is executing
-    void (*predLoadPtr)(THREADID, ADDRINT, BOOL);
-    void (*predStorePtr)(THREADID, ADDRINT, BOOL);
+    void (*predLoadPtr)(THREADID, ADDRINT, BOOL, UINT32);
+    void (*predStorePtr)(THREADID, ADDRINT, BOOL, UINT32);
+    void (*OffloadBegin)(THREADID);
+    void (*OffloadEnd)(THREADID);
     uint64_t type;
     uint64_t pad[1];
     //NOTE: By having the struct be a power of 2 bytes, indirect calls are simpler (w/ gcc 4.4 -O3, 6->5 instructions, and those instructions are simpler)
@@ -60,20 +63,28 @@ struct InstrFuncPtrs {  // NOLINT(whitespace)
 #define FPTR_NOP (2L)
 #define FPTR_RETRY (3L)
 
+
 //Generic core class
 
 class Core : public GlobAlloc {
     private:
         uint64_t lastUpdateCycles;
         uint64_t lastUpdateInstrs;
-
+        //int offload_code;
     protected:
         g_string name;
 
     public:
-        explicit Core(g_string& _name) : lastUpdateCycles(0), lastUpdateInstrs(0), name(_name) {}
+        explicit Core(g_string& _name) : lastUpdateCycles(0), lastUpdateInstrs(0),  name(_name)  {}
+	virtual void offloadFunction_begin()  = 0;
+	virtual void offloadFunction_end()  = 0;
+        virtual int get_offload_code()  = 0;
+        //void offloadFunction_begin() {offload_code++;}
+        //void offloadFunction_end() {offload_code--;}
+        //int get_offload_code(){return offload_code;} 
 
         virtual uint64_t getInstrs() const = 0; // typically used to find out termination conditions or dumps
+        virtual uint64_t getOffloadInstrs() const = 0; // LOIS: typically used to find out termination conditions or dumps
         virtual uint64_t getPhaseCycles() const = 0; // used by RDTSC faking --- we need to know how far along we are in the phase, but not the total number of phases
         virtual uint64_t getCycles() const = 0;
 

@@ -60,6 +60,27 @@ OOOCore::OOOCore(FilterCache* _l1i, FilterCache* _l1d, g_string& _name) : Core(_
     curCycle = 0;
     phaseEndCycle = zinfo->phaseLength;
 
+    pim_trace = false; // LOIS we get the trace in the MC, not in the core
+    previous_instr = 0;
+    ptrace = false;
+    print_trace = false;
+    only_offload = false;
+    total_missing_instructions = 0;
+    function_offload_instructions = 0;
+    // LOIS: Get the coreIdx from the name
+    g_string delim = "-";
+    auto start = 0U;
+    auto end = name.find(delim);
+    while (end != std::string::npos)
+    {
+      start = end + delim.length();
+      end = name.find(delim, start);
+    }
+
+    // LOIS: We update this values in each basic block
+    coreIdx = atoi((name.substr(start, end)).c_str());
+    threadIdx = coreIdx; 
+
     for (uint32_t i = 0; i < MAX_REGISTERS; i++) {
         regScoreboard[i] = 0;
     }
@@ -70,11 +91,141 @@ OOOCore::OOOCore(FilterCache* _l1i, FilterCache* _l1d, g_string& _name) : Core(_
     curCycleRFReads = 0;
     curCycleIssuedUops = 0;
     branchPc = 0;
-
+    
     instrs = uops = bbls = approxInstrs = mispredBranches = 0;
+
+    inter_instrs = 0; 
+    offload_code = 0;
 
     for (uint32_t i = 0; i < FWD_ENTRIES; i++) fwdArray[i].set((Address)(-1L), 0);
 }
+
+OOOCore::OOOCore(FilterCache* _l1i, FilterCache* _l1d, g_string& _name, bool _only_offload) : Core(_name), l1i(_l1i), l1d(_l1d), cRec(0, _name) {
+    decodeCycle = DECODE_STAGE;  // allow subtracting from it
+    curCycle = 0;
+    phaseEndCycle = zinfo->phaseLength;
+
+    pim_trace = false; // LOIS we get the trace in the MC, not in the core
+    previous_instr = 0;
+    ptrace = false;
+    print_trace = false;
+    only_offload = _only_offload; // only difference with the previous constructor
+    function_offload_instructions = 0;
+    total_missing_instructions = 0;
+    printf("Only offload: %d\n", (int)only_offload);
+    // LOIS: Get the coreIdx from the name
+    g_string delim = "-";
+    auto start = 0U;
+    auto end = name.find(delim);
+    while (end != std::string::npos)
+    {
+      start = end + delim.length();
+      end = name.find(delim, start);
+    }
+
+    // LOIS: We update this values in each basic block
+    coreIdx = atoi((name.substr(start, end)).c_str());
+    threadIdx = coreIdx; 
+
+    for (uint32_t i = 0; i < MAX_REGISTERS; i++) {
+        regScoreboard[i] = 0;
+    }
+    prevBbl = nullptr;
+
+    lastStoreCommitCycle = 0;
+    lastStoreAddrCommitCycle = 0;
+    curCycleRFReads = 0;
+    curCycleIssuedUops = 0;
+    branchPc = 0;
+    
+    instrs = uops = bbls = approxInstrs = mispredBranches = 0;
+
+    inter_instrs = 0; 
+    offload_code = 0;
+
+    for (uint32_t i = 0; i < FWD_ENTRIES; i++) fwdArray[i].set((Address)(-1L), 0);
+}
+
+///////////////////////////////////////////////////////////////////
+// Constructor for generating traces in the core, and not in the MC
+// ////////////////////////////////////////////////////////////////
+std::mutex OOOCore::mtx_traces;
+bool OOOCore::file_created = false;
+
+OOOCore::OOOCore(FilterCache* _l1i, FilterCache* _l1d, g_string& _name, bool only_offload_, bool instr_trace_, g_string& _outFile, bool _merge_hostTraces) : Core(_name), l1i(_l1i), l1d(_l1d), cRec(0, _name) {
+    printf("--> Generating traces in the core\n");
+    decodeCycle = DECODE_STAGE;  // allow subtracting from it
+    curCycle = 0;
+    phaseEndCycle = zinfo->phaseLength;
+
+    // Options for Generating traces
+    pim_trace = true;
+    previous_instr = 0;
+    total_missing_instructions = 0;
+    only_offload = only_offload_;
+    if(!only_offload){
+      ptrace = true;
+      print_trace = true;
+    } else {
+      ptrace = false;
+      print_trace = false;
+    }
+
+
+    instr_trace = instr_trace_;
+    offload_instrs = 0;
+    function_offload_instructions = 0;
+
+    // LOIS: Get the coreIdx from the name
+    g_string delim = "-";
+    auto start = 0U;
+    auto end = name.find(delim);
+    while (end != std::string::npos)
+    {
+      start = end + delim.length();
+      end = name.find(delim, start);
+    }
+    coreIdx = atoi((name.substr(start, end)).c_str());
+    
+    //LOIS
+    merge_hostTraces = _merge_hostTraces;
+    if(merge_hostTraces){
+      mtx_traces.lock();
+      if(!file_created) {
+        tracefile.open (_outFile.c_str());
+        file_created = true;
+      } else {
+        tracefile.open (_outFile.c_str(), ios::app);
+      }
+      mtx_traces.unlock();
+    } else {
+      // GERALDO
+      string tmp(_outFile.c_str());
+      string tmp2(".");
+      string to_open = tmp + tmp2 + std::to_string(coreIdx);
+      printf("--> Conf File: %s\n", to_open.c_str());
+      tracefile.open(to_open.c_str());
+    }
+        
+    for (uint32_t i = 0; i < MAX_REGISTERS; i++) {
+        regScoreboard[i] = 0;
+    }
+    prevBbl = nullptr;
+
+    lastStoreCommitCycle = 0;
+    lastStoreAddrCommitCycle = 0;
+    curCycleRFReads = 0;
+    curCycleIssuedUops = 0;
+    branchPc = 0;
+    
+    instrs = uops = bbls = approxInstrs = mispredBranches = 0;
+
+    inter_instrs = 0; 
+    offload_code = 0;
+
+    for (uint32_t i = 0; i < FWD_ENTRIES; i++) fwdArray[i].set((Address)(-1L), 0);
+}
+
 
 void OOOCore::initStats(AggregateStat* parentStat) {
     AggregateStat* coreStat = new AggregateStat();
@@ -117,6 +268,7 @@ void OOOCore::initStats(AggregateStat* parentStat) {
 }
 
 uint64_t OOOCore::getInstrs() const {return instrs;}
+uint64_t OOOCore::getOffloadInstrs() const {return offload_instrs;}
 uint64_t OOOCore::getPhaseCycles() const {return curCycle % zinfo->phaseLength;}
 
 void OOOCore::contextSwitch(int32_t gid) {
@@ -131,21 +283,30 @@ void OOOCore::contextSwitch(int32_t gid) {
 }
 
 
-InstrFuncPtrs OOOCore::GetFuncPtrs() {return {LoadFunc, StoreFunc, BblFunc, BranchFunc, PredLoadFunc, PredStoreFunc, FPTR_ANALYSIS, {0}};}
-
-inline void OOOCore::load(Address addr) {
-    loadAddrs[loads++] = addr;
+//InstrFuncPtrs OOOCore::GetFuncPtrs() {return {LoadFunc, StoreFunc, BblFunc, BranchFunc, PredLoadFunc, PredStoreFunc, FPTR_ANALYSIS, {0}};}
+InstrFuncPtrs OOOCore::GetFuncPtrs() {
+    return {LoadFunc, StoreFunc, BblFunc, BranchFunc, PredLoadFunc, PredStoreFunc, OffloadBegin, OffloadEnd, FPTR_ANALYSIS, {0} };
 }
 
-void OOOCore::store(Address addr) {
-    storeAddrs[stores++] = addr;
+inline void OOOCore::load(Address addr, uint32_t size) {
+    loadAddrs[loads] = addr;
+    loadSizes[loads] = size;
+    loads++;
+}
+
+void OOOCore::store(Address addr, uint32_t size) {
+    storeAddrs[stores] = addr;
+    storeSizes[stores] = size;
+    stores++;
 }
 
 // Predicated loads and stores call this function, gets recorded as a 0-cycle op.
 // Predication is rare enough that we don't need to model it perfectly to be accurate (i.e. the uops still execute, retire, etc), but this is needed for correctness.
 void OOOCore::predFalseMemOp() {
     // I'm going to go out on a limb and assume just loads are predicated (this will not fail silently if it's a store)
-    loadAddrs[loads++] = -1L;
+    loadAddrs[loads] = -1L;
+    loadSizes[loads] = 0;
+    loads++;
 }
 
 void OOOCore::branch(Address pc, bool taken, Address takenNpc, Address notTakenNpc) {
@@ -155,6 +316,77 @@ void OOOCore::branch(Address pc, bool taken, Address takenNpc, Address notTakenN
     branchNotTakenNpc = notTakenNpc;
 }
 
+// Call the memory controller
+// LOIS: Offload code
+// Deprecated
+inline void OOOCore::bbl_offload_mc(Address bblAddr, BblInfo* bblInfo) {
+    /* Simulate execution of previous BBL */
+    //uint32_t bblInstrs = prevBbl->instrs;
+    DynBbl* bbl = &(prevBbl->oooBbl[0]);
+
+    uint32_t loadIdx = 0;
+    uint32_t storeIdx = 0;
+
+    // Run dispatch/IW
+    for (uint32_t i = 0; i < bbl->uops; i++) {
+      DynUop* uop = &(bbl->uop[i]);
+      switch (uop->type) {
+        case UOP_LOAD:
+          {
+            Address addr = loadAddrs[loadIdx++];
+            offloadInfo offData;
+            offData.ld_addr = addr;
+            offData.st_addr = 0;
+            offData.inter_instrs = inter_instrs;
+            offData.coreIdx = coreIdx;
+            l1d->offload(offData);// 0 because there is not write address
+            inter_instrs = 0;
+            break;
+          }
+        case UOP_STORE:
+          {
+            Address addr = storeAddrs[storeIdx++];
+            offloadInfo offData;
+            offData.ld_addr = 0;
+            offData.st_addr = addr;
+            offData.inter_instrs = inter_instrs;
+            offData.coreIdx = coreIdx;
+            l1d->offload(offData);
+            inter_instrs = 0;
+            break;
+          }
+        default:
+          {
+            inter_instrs++;
+            break;
+          }
+      }
+    }
+    //assert_msg(loadIdx == loads, "%s: loadIdx(%d) != loads (%d)", name.c_str(), loadIdx, loads);
+    //assert_msg(storeIdx == stores, "%s: storeIdx(%d) != stores (%d)", name.c_str(), storeIdx, stores);
+    loads = stores = 0;
+}
+
+/*
+inline void OOOCore::bbl_offload() {
+  //print_trace = true;
+  //assert(!(regular_traces && pim_traces)); // TODO: no regular memory traces from the core 
+  //if((!pim_traces) && only_offload) {
+    //bbl_offload_mc(bblAddr, bblInfo); // host traces, only in offloaded functions
+  if(only_offload){
+    print_trace = true;
+    if((!pim_trace) && only_offload) {
+     offloadInfo offData;
+     offData.msg = OFFLOADING;
+     offData.coreIdx = coreIdx;
+     offData.threadIdx = threadIdx;
+     offData.content = ptrace?(1):(-1); // enter in the offloading funtion
+     l1d->offload(offData);// LOIS: just to indicate to the memory controller to write in the trace
+    }
+  }
+}
+*/
+
 inline void OOOCore::bbl(Address bblAddr, BblInfo* bblInfo) {
     if (!prevBbl) {
         // This is the 1st BBL since scheduled, nothing to simulate
@@ -163,6 +395,19 @@ inline void OOOCore::bbl(Address bblAddr, BblInfo* bblInfo) {
         loads = stores = 0;
         return;
     }
+
+    if(get_offload_code()>0){
+	    print_trace = true;
+	    if((!pim_trace) && only_offload) {
+		    offloadInfo offData;
+		    offData.msg = OFFLOADING;
+		    offData.coreIdx = coreIdx;
+		    offData.threadIdx = threadIdx;
+		    offData.content = print_trace?1:0; // enter in the offloading funtion
+		    l1d->offload(offData);// LOIS: just to indicate to the memory controller to write in the trace
+	    }
+    }
+
 
     /* Simulate execution of previous BBL */
 
@@ -246,9 +491,17 @@ inline void OOOCore::bbl(Address bblAddr, BblInfo* bblInfo) {
 
         // LSU simulation
         // NOTE: Ever-so-slightly faster than if-else if-else if-else
-        switch (uop->type) {
+	//
+			
+	if(ptrace) {
+	  offload_instrs++; // total
+      function_offload_instructions++; // per function (reseted at the end of the function)
+    }
+	//printf("Instr: %ld\n", instrs);
+	switch (uop->type) {
             case UOP_GENERAL:
                 commitCycle = dispatchCycle + uop->lat;
+                if(ptrace) previous_instr++;//LOIS
                 break;
 
             case UOP_LOAD:
@@ -265,10 +518,36 @@ inline void OOOCore::bbl(Address bblAddr, BblInfo* bblInfo) {
                     // Wait for all previous store addresses to be resolved
                     dispatchCycle = MAX(lastStoreAddrCommitCycle+1, dispatchCycle);
 
-                    Address addr = loadAddrs[loadIdx++];
+                    Address addr = loadAddrs[loadIdx];
+                    uint32_t size = loadSizes[loadIdx];
+                    loadIdx++;
                     uint64_t reqSatisfiedCycle = dispatchCycle;
                     if (addr != ((Address)-1L)) {
-                        reqSatisfiedCycle = l1d->load(addr, dispatchCycle) + L1D_LAT;
+                        // LOIS
+                        if( pim_trace && ptrace ){
+                            //THREAD_ID PROCESSOR_ID  CYCLE_NUM TYPE  ADDRESS SIZE
+                            if(merge_hostTraces){
+                              mtx_traces.lock();
+                              tracefile << threadIdx << " "<< coreIdx << " " << previous_instr << " L " << addr << " " <<  size << std::endl;
+                              mtx_traces.unlock();
+                            } else {
+                              tracefile << threadIdx << " "<< coreIdx << " " << previous_instr << " L " << addr << " " <<  size << std::endl;
+                            }
+                        } else {
+                            // NOtify the MC about the number of instructions 
+                            if(!pim_trace && ptrace) {
+                                offloadInfo offData;
+                                offData.msg = INSTR_COUNT; // enter in the offloading funtion
+                                offData.coreIdx = coreIdx;
+                                offData.threadIdx = threadIdx;
+                                offData.inter_instrs = previous_instr +1; // include cache hit
+                                l1d->offload(offData);// LOIS: just to indicate to the memory controller to the number of instructions executed before
+                                //printf("offload_instructions: %lld\n", (long long int)offload_instrs);
+                            } else total_missing_instructions += previous_instr;
+                        }
+                        //printf("MIssed instructions: %lld", (long long int)total_missing_instructions);
+                        previous_instr = 0;
+                        reqSatisfiedCycle = l1d->load(addr, dispatchCycle, instrs) + L1D_LAT;
                         cRec.record(curCycle, dispatchCycle, reqSatisfiedCycle);
                     }
 
@@ -304,8 +583,32 @@ inline void OOOCore::bbl(Address bblAddr, BblInfo* bblInfo) {
                     // Wait for all previous store addresses to be resolved (not just ours :))
                     dispatchCycle = MAX(lastStoreAddrCommitCycle+1, dispatchCycle);
 
-                    Address addr = storeAddrs[storeIdx++];
-                    uint64_t reqSatisfiedCycle = l1d->store(addr, dispatchCycle) + L1D_LAT;
+                    Address addr = storeAddrs[storeIdx];
+                    uint32_t size = storeSizes[storeIdx];
+                    storeIdx++;
+                    // LOIS
+                    if( pim_trace &&  ptrace){
+                        //THREAD_ID PROCESSOR_ID  CYCLE_NUM TYPE  ADDRESS SIZE
+                        if(merge_hostTraces){
+                          mtx_traces.lock();
+                          tracefile << threadIdx << " " << coreIdx << " " << previous_instr << " S " << addr << " "<< size << std::endl;
+                          mtx_traces.unlock();
+                        } else {
+                          tracefile << threadIdx << " " << coreIdx << " " << previous_instr << " S " << addr << " "<< size << std::endl;
+                        }   
+                    } else {
+                        // NOtify the MC about the number of instructions 
+                        if(!pim_trace && ptrace) {
+                            offloadInfo offData;
+                            offData.msg = INSTR_COUNT; // enter in the offloading funtion
+                            offData.coreIdx = coreIdx;
+                            offData.threadIdx = threadIdx;
+                            offData.inter_instrs = previous_instr +1 ; //include cache hits
+                            l1d->offload(offData);// LOIS: just to indicate to the memory controller the number of instructions executed since the last memory instruction
+                        } else total_missing_instructions += previous_instr;
+                    }
+                    previous_instr = 0;
+                    uint64_t reqSatisfiedCycle = l1d->store(addr, dispatchCycle, instrs) + L1D_LAT;
                     cRec.record(curCycle, dispatchCycle, reqSatisfiedCycle);
 
                     // Fill the forwarding table
@@ -320,11 +623,13 @@ inline void OOOCore::bbl(Address bblAddr, BblInfo* bblInfo) {
             case UOP_STORE_ADDR:
                 commitCycle = dispatchCycle + uop->lat;
                 lastStoreAddrCommitCycle = MAX(lastStoreAddrCommitCycle, commitCycle);
+                if(ptrace) previous_instr++;//LOIS
                 break;
 
             //case UOP_FENCE:  //make gcc happy
             default:
                 assert((UopType) uop->type == UOP_FENCE);
+                if(ptrace) previous_instr++;//LOIS
                 commitCycle = dispatchCycle + uop->lat;
                 // info("%d %ld %ld", uop->lat, lastStoreAddrCommitCycle, lastStoreCommitCycle);
                 // force future load serialization
@@ -355,8 +660,8 @@ inline void OOOCore::bbl(Address bblAddr, BblInfo* bblInfo) {
 
     // Check full match between expected and actual mem ops
     // If these assertions fail, most likely, something's off in the decoder
-    assert_msg(loadIdx == loads, "%s: loadIdx(%d) != loads (%d)", name.c_str(), loadIdx, loads);
-    assert_msg(storeIdx == stores, "%s: storeIdx(%d) != stores (%d)", name.c_str(), storeIdx, stores);
+   // assert_msg(loadIdx == loads, "%s: loadIdx(%d) != loads (%d)", name.c_str(), loadIdx, loads);
+   // assert_msg(storeIdx == stores, "%s: storeIdx(%d) != stores (%d)", name.c_str(), storeIdx, stores);
     loads = stores = 0;
 
 
@@ -403,20 +708,38 @@ inline void OOOCore::bbl(Address bblAddr, BblInfo* bblInfo) {
         //         lastCommitCycle-decodeCycle, lastCommitCycle-curCycle);
         Address wrongPathAddr = branchTaken? branchNotTakenNpc : branchTakenNpc;
         uint64_t reqCycle = fetchCycle;
-        for (uint32_t i = 0; i < 5*64/lineSize; i++) {
-            uint64_t fetchLat = l1i->load(wrongPathAddr + lineSize*i, curCycle) - curCycle;
-            cRec.record(curCycle, curCycle, curCycle + fetchLat);
-            uint64_t respCycle = reqCycle + fetchLat;
-            if (respCycle > lastCommitCycle) {
-                break;
-            }
-            // Model fetch throughput limit
-            reqCycle = respCycle + lineSize/FETCH_BYTES_PER_CYCLE;
+	for (uint32_t i = 0; i < 5*64/lineSize; i++) {
+	    uint64_t fetchLat = l1i->load(wrongPathAddr + lineSize*i, curCycle, instrs) - curCycle;
+	    cRec.record(curCycle, curCycle, curCycle + fetchLat);
+	    uint64_t respCycle = reqCycle + fetchLat;
+	    if (respCycle > lastCommitCycle) {
+		break;
+	    }
+	    // Model fetch throughput limit
+	    reqCycle = respCycle + lineSize/FETCH_BYTES_PER_CYCLE;
+	    // LOIS
+	    if( pim_trace && instr_trace && ptrace){
+		//THREAD_ID PROCESSOR_ID  CYCLE_NUM TYPE  ADDRESS SIZE
+        if(merge_hostTraces){
+          mtx_traces.lock();
+		  tracefile << threadIdx << " " << coreIdx << " - "  << " I " << (wrongPathAddr + lineSize*i) << " 64" << std::endl;
+          mtx_traces.unlock();
+        } else {
+		  tracefile << threadIdx << " " << coreIdx << " - "  << " I " << (wrongPathAddr + lineSize*i) << " 64" << std::endl;
         }
+        //previous_instr = 0;
+	    }
+	}
 
         fetchCycle = lastCommitCycle;
     }
     branchPc = 0;  // clear for next BBL
+
+    // Offload next Block
+    if(only_offload){
+	ptrace = print_trace;
+	print_trace = false;
+    }
 
     // Simulate current bbl ifetch
     Address endAddr = bblAddr + bblInfo->bytes;
@@ -425,9 +748,21 @@ inline void OOOCore::bbl(Address bblAddr, BblInfo* bblInfo) {
         // Do not model fetch throughput limit here, decoder-generated stalls already include it
         // We always call fetches with curCycle to avoid upsetting the weave
         // models (but we could move to a fetch-centric recorder to avoid this)
-        uint64_t fetchLat = l1i->load(fetchAddr, curCycle) - curCycle;
+        uint64_t fetchLat = l1i->load(fetchAddr, curCycle, instrs) - curCycle;
         cRec.record(curCycle, curCycle, curCycle + fetchLat);
         fetchCycle += fetchLat;
+        // LOIS
+        if( pim_trace && instr_trace && ptrace){
+            //THREAD_ID PROCESSOR_ID  CYCLE_NUM TYPE  ADDRESS SIZE
+           if(merge_hostTraces){
+             mtx_traces.lock();
+             tracefile << threadIdx << " " << coreIdx << " - "  << " I " << fetchAddr << " 64" << std::endl;
+             mtx_traces.unlock();
+           } else {
+             tracefile << threadIdx << " " << coreIdx << " - "  << " I " << fetchAddr << " 64" << std::endl;
+           }
+             //previous_instr = 0;
+        }
     }
 
     // If fetch rules, take into account delay between fetch and decode;
@@ -484,39 +819,53 @@ void OOOCore::advance(uint64_t targetCycle) {
 
 // Pin interface code
 
-void OOOCore::LoadFunc(THREADID tid, ADDRINT addr) {static_cast<OOOCore*>(cores[tid])->load(addr);}
-void OOOCore::StoreFunc(THREADID tid, ADDRINT addr) {static_cast<OOOCore*>(cores[tid])->store(addr);}
+void OOOCore::LoadFunc(THREADID tid, ADDRINT addr, UINT32 size) {static_cast<OOOCore*>(cores[tid])->load(addr, size);}
+void OOOCore::StoreFunc(THREADID tid, ADDRINT addr, UINT32 size) {static_cast<OOOCore*>(cores[tid])->store(addr, size);}
 
-void OOOCore::PredLoadFunc(THREADID tid, ADDRINT addr, BOOL pred) {
+//LOIS
+void OOOCore::OffloadBegin(THREADID tid) {static_cast<OOOCore*>(cores[tid])->offloadFunction_begin();}
+void OOOCore::OffloadEnd(THREADID tid) {static_cast<OOOCore*>(cores[tid])->offloadFunction_end();}
+
+void OOOCore::PredLoadFunc(THREADID tid, ADDRINT addr, BOOL pred, UINT32 size) {
     OOOCore* core = static_cast<OOOCore*>(cores[tid]);
-    if (pred) core->load(addr);
+    if (pred) core->load(addr, size);
     else core->predFalseMemOp();
 }
 
-void OOOCore::PredStoreFunc(THREADID tid, ADDRINT addr, BOOL pred) {
+void OOOCore::PredStoreFunc(THREADID tid, ADDRINT addr, BOOL pred, UINT32 size) {
     OOOCore* core = static_cast<OOOCore*>(cores[tid]);
-    if (pred) core->store(addr);
+    if (pred) core->store(addr, size);
     else core->predFalseMemOp();
 }
 
 void OOOCore::BblFunc(THREADID tid, ADDRINT bblAddr, BblInfo* bblInfo) {
-    OOOCore* core = static_cast<OOOCore*>(cores[tid]);
-    core->bbl(bblAddr, bblInfo);
+  OOOCore* core = static_cast<OOOCore*>(cores[tid]);
 
-    while (core->curCycle > core->phaseEndCycle) {
-        core->phaseEndCycle += zinfo->phaseLength;
+  //if(core->get_offload_code()>0){
+  //   core->bbl_offload();
+  //} 
 
-        uint32_t cid = getCid(tid);
-        // NOTE: TakeBarrier may take ownership of the core, and so it will be used by some other thread. If TakeBarrier context-switches us,
-        // the *only* safe option is to return inmmediately after we detect this, or we can race and corrupt core state. However, the information
-        // here is insufficient to do that, so we could wind up double-counting phases.
-        uint32_t newCid = TakeBarrier(tid, cid);
-        // NOTE: Upon further observation, we cannot race if newCid == cid, so this code should be enough.
-        // It may happen that we had an intervening context-switch and we are now back to the same core.
-        // This is fine, since the loop looks at core values directly and there are no locals involved,
-        // so we should just advance as needed and move on.
-        if (newCid != cid) break;  /*context-switch, we do not own this context anymore*/
-    }
+
+  core->bbl(bblAddr, bblInfo);
+  
+  while (core->curCycle > core->phaseEndCycle) {
+    core->phaseEndCycle += zinfo->phaseLength;
+     
+    
+    uint32_t cid = getCid(tid);
+    core->coreIdx = cid;
+    core->threadIdx = tid;
+    // NOTE: TakeBarrier may take ownership of the core, and so it will be used by some other thread. If TakeBarrier context-switches us,
+    // the *only* safe option is to return inmmediately after we detect this, or we can race and corrupt core state. However, the information
+    // here is insufficient to do that, so we could wind up double-counting phases.
+    uint32_t newCid = TakeBarrier(tid, cid);
+    // NOTE: Upon further observation, we cannot race if newCid == cid, so this code should be enough.
+    // It may happen that we had an intervening context-switch and we are now back to the same core.
+    // This is fine, since the loop looks at core values directly and there are no locals involved,
+    // so we should just advance as needed and move on.
+    if (newCid != cid) break;  /*context-switch, we do not own this context anymore*/
+  }
+
 }
 
 void OOOCore::BranchFunc(THREADID tid, ADDRINT pc, BOOL taken, ADDRINT takenNpc, ADDRINT notTakenNpc) {

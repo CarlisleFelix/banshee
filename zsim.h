@@ -101,6 +101,7 @@ struct GlobSimInfo {
     uint64_t maxPhases; //terminate when this many phases have been reached
     uint64_t maxMinInstrs; //terminate when all threads have reached this many instructions
     uint64_t maxTotalInstrs; //terminate when the aggregate number of instructions reaches this number
+    uint64_t maxOffloadInstrs; // LOIS: terminate when the number of offload instructions reaches this number
     uint64_t maxSimTimeNs; //terminate when the simulation time (bound+weave) exceeds this many ns
     uint64_t maxProcEventualDumps; //term if the number of heartbeat-triggered process dumps reached this (MP/MT)
 

@@ -59,6 +59,7 @@ class CC : public GlobAlloc {
         //Repl policy interface
         virtual uint32_t numSharers(uint32_t lineId) = 0;
         virtual bool isValid(uint32_t lineId) = 0;
+	virtual uint64_t offload(offloadInfo offData) = 0;
 };
 
 
@@ -144,15 +145,15 @@ class MESIBottomCC : public GlobAlloc {
             parentStat->append(&profGETNetLat);
         }
 
-        uint64_t processEviction(Address wbLineAddr, uint32_t lineId, bool lowerLevelWriteback, uint64_t cycle, uint32_t srcId);
+        uint64_t processEviction(Address wbLineAddr, uint32_t lineId, bool lowerLevelWriteback, uint64_t cycle, uint32_t srcId, uint64_t previous_instructions, uint32_t coreId, uint32_t flagsTraces, Address readAddr);
 
-        uint64_t processAccess(Address lineAddr, uint32_t lineId, AccessType type, uint64_t cycle, uint32_t srcId, uint32_t flags);
+        uint64_t processAccess(Address lineAddr, uint32_t lineId, AccessType type, uint64_t cycle, uint32_t srcId, uint32_t flags, uint64_t previous_instructions, uint32_t coreId, uint32_t flagsTraces);
 
         void processWritebackOnAccess(Address lineAddr, uint32_t lineId, AccessType type);
 
         void processInval(Address lineAddr, uint32_t lineId, InvType type, bool* reqWriteback);
 
-        uint64_t processNonInclusiveWriteback(Address lineAddr, AccessType type, uint64_t cycle, MESIState* state, uint32_t srcId, uint32_t flags);
+        uint64_t processNonInclusiveWriteback(Address lineAddr, AccessType type, uint64_t cycle, MESIState* state, uint32_t srcId, uint32_t flags, uint64_t previous_instructions, uint32_t coreId, uint32_t flagsTraces);
 
         inline void lock() {
             futex_lock(&ccLock);
@@ -166,6 +167,14 @@ class MESIBottomCC : public GlobAlloc {
         inline bool isValid(uint32_t lineId) {
             return array[lineId] != I;
         }
+
+	// LOIS
+	inline uint64_t offload(offloadInfo offData){
+	    Address lineAddr;
+	    if(offData.st_addr!=0) lineAddr = offData.st_addr;
+	    else lineAddr = offData.ld_addr; 
+	    return parents[getParentId(lineAddr)]->offload(offData);
+	}
 
         //Could extend with isExclusive, isDirty, etc, but not needed for now.
 
@@ -220,10 +229,10 @@ class MESITopCC : public GlobAlloc {
 
         void init(const g_vector<BaseCache*>& _children, Network* network, const char* name);
 
-        uint64_t processEviction(Address wbLineAddr, uint32_t lineId, bool* reqWriteback, uint64_t cycle, uint32_t srcId);
+        uint64_t processEviction(Address wbLineAddr, uint32_t lineId, bool* reqWriteback, uint64_t cycle, uint32_t srcId, uint64_t previous_instructions, uint32_t coreId, uint32_t flagsTraces, Address readAddr);
 
         uint64_t processAccess(Address lineAddr, uint32_t lineId, AccessType type, uint32_t childId, bool haveExclusive,
-                MESIState* childState, bool* inducedWriteback, uint64_t cycle, uint32_t srcId, uint32_t flags);
+                MESIState* childState, bool* inducedWriteback, uint64_t cycle, uint32_t srcId, uint32_t flags, uint64_t previous_instructions, uint32_t coreId, uint32_t flagsTraces);
 
         uint64_t processInval(Address lineAddr, uint32_t lineId, InvType type, bool* reqWriteback, uint64_t cycle, uint32_t srcId);
 
@@ -339,8 +348,8 @@ class MESICC : public CC {
 
         uint64_t processEviction(const MemReq& triggerReq, Address wbLineAddr, int32_t lineId, uint64_t startCycle) {
             bool lowerLevelWriteback = false;
-            uint64_t evCycle = tcc->processEviction(wbLineAddr, lineId, &lowerLevelWriteback, startCycle, triggerReq.srcId); //1. if needed, send invalidates/downgrades to lower level
-            evCycle = bcc->processEviction(wbLineAddr, lineId, lowerLevelWriteback, evCycle, triggerReq.srcId); //2. if needed, write back line to upper level
+            uint64_t evCycle = tcc->processEviction(wbLineAddr, lineId, &lowerLevelWriteback, startCycle, triggerReq.srcId, triggerReq.previous_instructions, triggerReq.coreId, triggerReq.flagsTraces, triggerReq.lineAddr); //1. if needed, send invalidates/downgrades to lower level
+            evCycle = bcc->processEviction(wbLineAddr, lineId, lowerLevelWriteback, evCycle, triggerReq.srcId, triggerReq.previous_instructions, triggerReq.coreId, triggerReq.flagsTraces, triggerReq.lineAddr); //2. if needed, write back line to upper level
             return evCycle;
         }
 
@@ -354,7 +363,7 @@ class MESICC : public CC {
             if (lineId == -1 || (((req.type == PUTS) || (req.type == PUTX)) && !bcc->isValid(lineId))) { //can only be a non-inclusive wback
                 assert(nonInclusiveHack);
                 assert((req.type == PUTS) || (req.type == PUTX));
-                respCycle = bcc->processNonInclusiveWriteback(req.lineAddr, req.type, startCycle, req.state, req.srcId, req.flags);
+                respCycle = bcc->processNonInclusiveWriteback(req.lineAddr, req.type, startCycle, req.state, req.srcId, req.flags, req.previous_instructions, req.coreId, req.flagsTraces);
             } else {
                 //Prefetches are side requests and get handled a bit differently
                 bool isPrefetch = req.flags & MemReq::PREFETCH;
@@ -362,14 +371,14 @@ class MESICC : public CC {
                 uint32_t flags = req.flags & ~MemReq::PREFETCH; //always clear PREFETCH, this flag cannot propagate up
 
                 //if needed, fetch line or upgrade miss from upper level
-                respCycle = bcc->processAccess(req.lineAddr, lineId, req.type, startCycle, req.srcId, flags);
+                respCycle = bcc->processAccess(req.lineAddr, lineId, req.type, startCycle, req.srcId, flags, req.previous_instructions, req.coreId, req.flagsTraces);
                 if (getDoneCycle) *getDoneCycle = respCycle;
                 if (!isPrefetch) { //prefetches only touch bcc; the demand request from the core will pull the line to lower level
                     //At this point, the line is in a good state w.r.t. upper levels
                     bool lowerLevelWriteback = false;
                     //change directory info, invalidate other children if needed, tell requester about its state
                     respCycle = tcc->processAccess(req.lineAddr, lineId, req.type, req.childId, bcc->isExclusive(lineId), req.state,
-                            &lowerLevelWriteback, respCycle, req.srcId, flags);
+                            &lowerLevelWriteback, respCycle, req.srcId, flags, req.previous_instructions, req.coreId, req.flagsTraces);
                     if (lowerLevelWriteback) {
                         //Essentially, if tcc induced a writeback, bcc may need to do an E->M transition to reflect that the cache now has dirty data
                         bcc->processWritebackOnAccess(req.lineAddr, lineId, req.type);
@@ -405,6 +414,11 @@ class MESICC : public CC {
         //Repl policy interface
         uint32_t numSharers(uint32_t lineId) {return tcc->numSharers(lineId);}
         bool isValid(uint32_t lineId) {return bcc->isValid(lineId);}
+
+	// LOIS
+	uint64_t offload(offloadInfo offData){
+	    return bcc->offload(offData);
+	}
 };
 
 // Terminal CC, i.e., without children --- accepts GETS/X, but not PUTS/X
@@ -458,7 +472,7 @@ class MESITerminalCC : public CC {
 
         uint64_t processEviction(const MemReq& triggerReq, Address wbLineAddr, int32_t lineId, uint64_t startCycle) {
             bool lowerLevelWriteback = false;
-            uint64_t endCycle = bcc->processEviction(wbLineAddr, lineId, lowerLevelWriteback, startCycle, triggerReq.srcId); //2. if needed, write back line to upper level
+            uint64_t endCycle = bcc->processEviction(wbLineAddr, lineId, lowerLevelWriteback, startCycle, triggerReq.srcId, triggerReq.previous_instructions, triggerReq.coreId, triggerReq.flagsTraces, triggerReq.lineAddr); //2. if needed, write back line to upper level
             return endCycle;  // critical path unaffected, but TimingCache needs it
         }
 
@@ -466,7 +480,7 @@ class MESITerminalCC : public CC {
             assert(lineId != -1);
             assert(!getDoneCycle);
             //if needed, fetch line or upgrade miss from upper level
-            uint64_t respCycle = bcc->processAccess(req.lineAddr, lineId, req.type, startCycle, req.srcId, req.flags);
+            uint64_t respCycle = bcc->processAccess(req.lineAddr, lineId, req.type, startCycle, req.srcId, req.flags, req.previous_instructions, req.coreId, req.flagsTraces);
             //at this point, the line is in a good state w.r.t. upper levels
             return respCycle;
         }
@@ -493,6 +507,11 @@ class MESITerminalCC : public CC {
         //Repl policy interface
         uint32_t numSharers(uint32_t lineId) {return 0;} //no sharers
         bool isValid(uint32_t lineId) {return bcc->isValid(lineId);}
+
+
+	uint64_t offload(offloadInfo offData){
+	    return bcc->offload(offData);
+	}
 };
 
 #endif  // COHERENCE_CTRLS_H_

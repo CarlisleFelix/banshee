@@ -32,11 +32,28 @@
 #include "g_std/g_vector.h"
 #include "galloc.h"
 #include "locks.h"
+#include "g_std/g_string.h"
 
 /** TYPES **/
 
 /* Addresses are plain 64-bit uints. This should be kept compatible with PIN addrints */
 typedef uint64_t Address;
+
+
+// LOIS: for offloading to PIM
+enum msg_type {MEM_INSTR, INSTR_COUNT, OFFLOADING};
+struct offloadInfo {
+    msg_type  msg;
+    // For MEM_INSTR 
+    Address   ld_addr;
+    Address   st_addr;
+    uint64_t  inter_instrs;
+    uint32_t  coreIdx;
+    uint32_t  threadIdx;
+    // FOR OTHER MSGs
+    int64_t  content;
+};
+
 
 /* Types of Access. An Access is a request that proceeds from lower to upper
  * levels of the hierarchy (core->l1->l2, etc.)
@@ -99,9 +116,20 @@ struct MemReq {
         PREFETCH      = (1<<5), //Prefetch GETS access. Only set at level where prefetch is issued; handled early in MESICC
     };
     uint32_t flags;
+    
+    uint64_t previous_instructions; //LOIS
+    uint64_t coreId; //LOIS
+    enum FlagTrace {
+        PREFETCH_TRACE  = (1<<1),
+        WRITE_TRACE  = (1<<2),
+    };
+    uint32_t flagsTraces;// Lois
+    Address readAddr; // Read that caused the eviction
 
     inline void set(Flag f) {flags |= f;}
     inline bool is (Flag f) const {return flags & f;}
+    inline void set(FlagTrace f) {flagsTraces |= f;} // LOIS
+    inline bool is (FlagTrace f) const {return flagsTraces & f;} // LOIS
 };
 
 /* Invalidation/downgrade request */
@@ -124,9 +152,9 @@ class MemObject : public GlobAlloc {
     public:
         //Returns response cycle
         virtual uint64_t access(MemReq& req) = 0;
-        virtual uint64_t access(MemReq& req, int type, uint32_t data_size) { assert(false); }; // return access(req); };
         virtual void initStats(AggregateStat* parentStat) {}
         virtual const char* getName() = 0;
+	virtual uint64_t offload(offloadInfo offData) = 0;
 };
 
 /* Base class for all cache objects */

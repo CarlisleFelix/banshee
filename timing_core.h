@@ -51,6 +51,7 @@ class TimingCore : public Core {
         void initStats(AggregateStat* parentStat);
 
         uint64_t getInstrs() const {return instrs;}
+        uint64_t getOffloadInstrs() const {return 0;}
         uint64_t getPhaseCycles() const;
         uint64_t getCycles() const {return cRec.getUnhaltedCycles(curCycle);}
 
@@ -70,12 +71,19 @@ class TimingCore : public Core {
         inline void storeAndRecord(Address addr);
         inline void bblAndRecord(Address bblAddr, BblInfo* bblInstrs);
         inline void record(uint64_t startCycle);
+        
+        // LOIS: TODO: offloaded code
+        void offloadFunction_begin() { }
+        void offloadFunction_end() { }
+        int get_offload_code() { return 0; }
 
-        static void LoadAndRecordFunc(THREADID tid, ADDRINT addr);
-        static void StoreAndRecordFunc(THREADID tid, ADDRINT addr);
+        static void OffloadBegin(THREADID tid);
+        static void OffloadEnd(THREADID tid);
+        static void LoadAndRecordFunc(THREADID tid, ADDRINT addr, UINT32 size);
+        static void StoreAndRecordFunc(THREADID tid, ADDRINT addr, UINT32 size);
         static void BblAndRecordFunc(THREADID tid, ADDRINT bblAddr, BblInfo* bblInfo);
-        static void PredLoadAndRecordFunc(THREADID tid, ADDRINT addr, BOOL pred);
-        static void PredStoreAndRecordFunc(THREADID tid, ADDRINT addr, BOOL pred);
+        static void PredLoadAndRecordFunc(THREADID tid, ADDRINT addr, BOOL pred, UINT32 size);
+        static void PredStoreAndRecordFunc(THREADID tid, ADDRINT addr, BOOL pred, UINT32 size);
 
         static void BranchFunc(THREADID, ADDRINT, BOOL, ADDRINT, ADDRINT) {}
 } ATTR_LINE_ALIGNED;

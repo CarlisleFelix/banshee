@@ -28,7 +28,8 @@
 
 #include "zsim.h"
 #include <algorithm>
-#include <bits/signum.h>
+//#include <bits/signum.h>
+#include <signal.h>
 #include <dlfcn.h>
 #include <execinfo.h>
 #include <fstream>
@@ -165,13 +166,14 @@ VOID FFThread(VOID* arg);
 
 InstrFuncPtrs fPtrs[MAX_THREADS] ATTR_LINE_ALIGNED; //minimize false sharing
 
-VOID PIN_FAST_ANALYSIS_CALL IndirectLoadSingle(THREADID tid, ADDRINT addr) {
-    fPtrs[tid].loadPtr(tid, addr);
+VOID PIN_FAST_ANALYSIS_CALL IndirectLoadSingle(THREADID tid, ADDRINT addr, UINT32 size) {
+    fPtrs[tid].loadPtr(tid, addr, size);
 }
 
-VOID PIN_FAST_ANALYSIS_CALL IndirectStoreSingle(THREADID tid, ADDRINT addr) {
-    fPtrs[tid].storePtr(tid, addr);
+VOID PIN_FAST_ANALYSIS_CALL IndirectStoreSingle(THREADID tid, ADDRINT addr, UINT32 size) {
+    fPtrs[tid].storePtr(tid, addr, size);
 }
+
 
 VOID PIN_FAST_ANALYSIS_CALL IndirectBasicBlock(THREADID tid, ADDRINT bblAddr, BblInfo* bblInfo) {
     fPtrs[tid].bblPtr(tid, bblAddr, bblInfo);
@@ -181,12 +183,12 @@ VOID PIN_FAST_ANALYSIS_CALL IndirectRecordBranch(THREADID tid, ADDRINT branchPc,
     fPtrs[tid].branchPtr(tid, branchPc, taken, takenNpc, notTakenNpc);
 }
 
-VOID PIN_FAST_ANALYSIS_CALL IndirectPredLoadSingle(THREADID tid, ADDRINT addr, BOOL pred) {
-    fPtrs[tid].predLoadPtr(tid, addr, pred);
+VOID PIN_FAST_ANALYSIS_CALL IndirectPredLoadSingle(THREADID tid, ADDRINT addr, BOOL pred, UINT32 size) {
+    fPtrs[tid].predLoadPtr(tid, addr, pred, size);
 }
 
-VOID PIN_FAST_ANALYSIS_CALL IndirectPredStoreSingle(THREADID tid, ADDRINT addr, BOOL pred) {
-    fPtrs[tid].predStorePtr(tid, addr, pred);
+VOID PIN_FAST_ANALYSIS_CALL IndirectPredStoreSingle(THREADID tid, ADDRINT addr, BOOL pred, UINT32 size) {
+    fPtrs[tid].predStorePtr(tid, addr, pred, size);
 }
 
 
@@ -207,14 +209,14 @@ void Join(uint32_t tid) {
     fPtrs[tid] = cores[tid]->GetFuncPtrs(); //back to normal pointers
 }
 
-VOID JoinAndLoadSingle(THREADID tid, ADDRINT addr) {
+VOID JoinAndLoadSingle(THREADID tid, ADDRINT addr, UINT32 size) {
     Join(tid);
-    fPtrs[tid].loadPtr(tid, addr);
+    fPtrs[tid].loadPtr(tid, addr, size);
 }
 
-VOID JoinAndStoreSingle(THREADID tid, ADDRINT addr) {
+VOID JoinAndStoreSingle(THREADID tid, ADDRINT addr, UINT32 size) {
     Join(tid);
-    fPtrs[tid].storePtr(tid, addr);
+    fPtrs[tid].storePtr(tid, addr, size);
 }
 
 VOID JoinAndBasicBlock(THREADID tid, ADDRINT bblAddr, BblInfo* bblInfo) {
@@ -227,21 +229,35 @@ VOID JoinAndRecordBranch(THREADID tid, ADDRINT branchPc, BOOL taken, ADDRINT tak
     fPtrs[tid].branchPtr(tid, branchPc, taken, takenNpc, notTakenNpc);
 }
 
-VOID JoinAndPredLoadSingle(THREADID tid, ADDRINT addr, BOOL pred) {
+VOID JoinAndPredLoadSingle(THREADID tid, ADDRINT addr, BOOL pred, UINT32 size) {
     Join(tid);
-    fPtrs[tid].predLoadPtr(tid, addr, pred);
+    fPtrs[tid].predLoadPtr(tid, addr, pred, size);
 }
 
-VOID JoinAndPredStoreSingle(THREADID tid, ADDRINT addr, BOOL pred) {
+VOID JoinAndPredStoreSingle(THREADID tid, ADDRINT addr, BOOL pred, UINT32 size) {
     Join(tid);
-    fPtrs[tid].predStorePtr(tid, addr, pred);
+    fPtrs[tid].predStorePtr(tid, addr, pred, size);
+}
+
+// LOIS
+VOID JoinAndOffloadBegin(THREADID tid) {
+    Join(tid);
+    fPtrs[tid].OffloadBegin(tid);
+}
+VOID JoinAndOffloadEnd(THREADID tid) {
+    Join(tid);
+    fPtrs[tid].OffloadEnd(tid);
 }
 
 // NOP variants: Do nothing
-VOID NOPLoadStoreSingle(THREADID tid, ADDRINT addr) {}
+VOID NOPLoadStoreSingle(THREADID tid, ADDRINT addr, UINT32 size) {}
 VOID NOPBasicBlock(THREADID tid, ADDRINT bblAddr, BblInfo* bblInfo) {}
 VOID NOPRecordBranch(THREADID tid, ADDRINT addr, BOOL taken, ADDRINT takenNpc, ADDRINT notTakenNpc) {}
-VOID NOPPredLoadStoreSingle(THREADID tid, ADDRINT addr, BOOL pred) {}
+VOID NOPPredLoadStoreSingle(THREADID tid, ADDRINT addr, BOOL pred, UINT32 size) {}
+
+//LOIS
+VOID NOPPredOffloadBegin(THREADID tid) {}
+VOID NOPPredOffloadEnd(THREADID tid) {}
 
 // FF is basically NOP except for basic blocks
 VOID FFBasicBlock(THREADID tid, ADDRINT bblAddr, BblInfo* bblInfo) {
@@ -363,13 +379,13 @@ VOID FFIEntryBasicBlock(THREADID tid, ADDRINT bblAddr, BblInfo* bblInfo) {
 }
 
 // Non-analysis pointer vars
-static const InstrFuncPtrs joinPtrs = {JoinAndLoadSingle, JoinAndStoreSingle, JoinAndBasicBlock, JoinAndRecordBranch, JoinAndPredLoadSingle, JoinAndPredStoreSingle, FPTR_JOIN};
-static const InstrFuncPtrs nopPtrs = {NOPLoadStoreSingle, NOPLoadStoreSingle, NOPBasicBlock, NOPRecordBranch, NOPPredLoadStoreSingle, NOPPredLoadStoreSingle, FPTR_NOP};
-static const InstrFuncPtrs retryPtrs = {NOPLoadStoreSingle, NOPLoadStoreSingle, NOPBasicBlock, NOPRecordBranch, NOPPredLoadStoreSingle, NOPPredLoadStoreSingle, FPTR_RETRY};
-static const InstrFuncPtrs ffPtrs = {NOPLoadStoreSingle, NOPLoadStoreSingle, FFBasicBlock, NOPRecordBranch, NOPPredLoadStoreSingle, NOPPredLoadStoreSingle, FPTR_NOP};
+static const InstrFuncPtrs joinPtrs = {JoinAndLoadSingle, JoinAndStoreSingle, JoinAndBasicBlock, JoinAndRecordBranch, JoinAndPredLoadSingle, JoinAndPredStoreSingle, JoinAndOffloadBegin, JoinAndOffloadEnd, FPTR_JOIN};
+static const InstrFuncPtrs nopPtrs = {NOPLoadStoreSingle, NOPLoadStoreSingle, NOPBasicBlock, NOPRecordBranch, NOPPredLoadStoreSingle, NOPPredLoadStoreSingle, NOPPredOffloadBegin, NOPPredOffloadEnd, FPTR_NOP};
+static const InstrFuncPtrs retryPtrs = {NOPLoadStoreSingle, NOPLoadStoreSingle, NOPBasicBlock, NOPRecordBranch, NOPPredLoadStoreSingle, NOPPredLoadStoreSingle, NOPPredOffloadBegin, NOPPredOffloadEnd, FPTR_RETRY};
+static const InstrFuncPtrs ffPtrs = {NOPLoadStoreSingle, NOPLoadStoreSingle, FFBasicBlock, NOPRecordBranch, NOPPredLoadStoreSingle, NOPPredLoadStoreSingle, NOPPredOffloadBegin, NOPPredOffloadEnd, FPTR_NOP};
 
-static const InstrFuncPtrs ffiPtrs = {NOPLoadStoreSingle, NOPLoadStoreSingle, FFIBasicBlock, NOPRecordBranch, NOPPredLoadStoreSingle, NOPPredLoadStoreSingle, FPTR_NOP};
-static const InstrFuncPtrs ffiEntryPtrs = {NOPLoadStoreSingle, NOPLoadStoreSingle, FFIEntryBasicBlock, NOPRecordBranch, NOPPredLoadStoreSingle, NOPPredLoadStoreSingle, FPTR_NOP};
+static const InstrFuncPtrs ffiPtrs = {NOPLoadStoreSingle, NOPLoadStoreSingle, FFIBasicBlock, NOPRecordBranch, NOPPredLoadStoreSingle, NOPPredLoadStoreSingle, NOPPredOffloadBegin, NOPPredOffloadEnd, FPTR_NOP};
+static const InstrFuncPtrs ffiEntryPtrs = {NOPLoadStoreSingle, NOPLoadStoreSingle, FFIEntryBasicBlock, NOPRecordBranch, NOPPredLoadStoreSingle, NOPPredLoadStoreSingle, NOPPredOffloadBegin, NOPPredOffloadEnd, FPTR_NOP};
 
 static const InstrFuncPtrs& GetFFPtrs() {
     return ffiEnabled? (ffiNFF? ffiEntryPtrs : ffiPtrs) : ffPtrs;
@@ -445,6 +461,19 @@ VOID CheckForTermination() {
         if (totalInstrs >= zinfo->maxTotalInstrs) {
             zinfo->terminationConditionMet = true;
             info("Max total (aggregate) instructions reached (%ld)", totalInstrs);
+            return;
+        }
+    }
+
+    if (zinfo->maxOffloadInstrs) {
+        uint64_t totalOffloadInstrs = 0;
+        for (uint32_t i = 0; i < zinfo->numCores; i++) {
+            totalOffloadInstrs += zinfo->cores[i]->getOffloadInstrs();
+        }
+
+        if (totalOffloadInstrs >= zinfo->maxOffloadInstrs) {
+            zinfo->terminationConditionMet = true;
+            info("Max offload instructions reached (%ld)", totalOffloadInstrs);
             return;
         }
     }
@@ -541,33 +570,34 @@ VOID Instruction(INS ins) {
 
         if (INS_IsMemoryRead(ins)) {
             if (!INS_IsPredicated(ins)) {
-                INS_InsertCall(ins, IPOINT_BEFORE, LoadFuncPtr, IARG_FAST_ANALYSIS_CALL, IARG_THREAD_ID, IARG_MEMORYREAD_EA, IARG_END);
+                INS_InsertCall(ins, IPOINT_BEFORE, LoadFuncPtr, IARG_FAST_ANALYSIS_CALL, IARG_THREAD_ID, IARG_MEMORYREAD_EA, IARG_MEMORYREAD_SIZE /*LOIS: track the size of the read*/, IARG_END);
             } else {
-                INS_InsertCall(ins, IPOINT_BEFORE, PredLoadFuncPtr, IARG_FAST_ANALYSIS_CALL, IARG_THREAD_ID, IARG_MEMORYREAD_EA, IARG_EXECUTING, IARG_END);
+                INS_InsertCall(ins, IPOINT_BEFORE, PredLoadFuncPtr, IARG_FAST_ANALYSIS_CALL, IARG_THREAD_ID, IARG_MEMORYREAD_EA, IARG_EXECUTING, IARG_MEMORYREAD_SIZE /*LOIS: track the size of the read*/, IARG_END);
             }
         }
 
         if (INS_HasMemoryRead2(ins)) {
             if (!INS_IsPredicated(ins)) {
-                INS_InsertCall(ins, IPOINT_BEFORE, LoadFuncPtr, IARG_FAST_ANALYSIS_CALL, IARG_THREAD_ID, IARG_MEMORYREAD2_EA, IARG_END);
+                INS_InsertCall(ins, IPOINT_BEFORE, LoadFuncPtr, IARG_FAST_ANALYSIS_CALL, IARG_THREAD_ID, IARG_MEMORYREAD2_EA, IARG_MEMORYREAD_SIZE /*LOIS: track the size of the read*/, IARG_END);
             } else {
-                INS_InsertCall(ins, IPOINT_BEFORE, PredLoadFuncPtr, IARG_FAST_ANALYSIS_CALL, IARG_THREAD_ID, IARG_MEMORYREAD2_EA, IARG_EXECUTING, IARG_END);
+                INS_InsertCall(ins, IPOINT_BEFORE, PredLoadFuncPtr, IARG_FAST_ANALYSIS_CALL, IARG_THREAD_ID, IARG_MEMORYREAD2_EA, IARG_EXECUTING, IARG_MEMORYREAD_SIZE /*LOIS: track the size of the read*/, IARG_END);
             }
         }
 
         if (INS_IsMemoryWrite(ins)) {
             if (!INS_IsPredicated(ins)) {
-                INS_InsertCall(ins, IPOINT_BEFORE,  StoreFuncPtr, IARG_FAST_ANALYSIS_CALL, IARG_THREAD_ID, IARG_MEMORYWRITE_EA, IARG_END);
+                INS_InsertCall(ins, IPOINT_BEFORE,  StoreFuncPtr, IARG_FAST_ANALYSIS_CALL, IARG_THREAD_ID, IARG_MEMORYWRITE_EA, IARG_MEMORYREAD_SIZE /*LOIS: track the size of the read*/, IARG_END);
             } else {
-                INS_InsertCall(ins, IPOINT_BEFORE,  PredStoreFuncPtr, IARG_FAST_ANALYSIS_CALL, IARG_THREAD_ID, IARG_MEMORYWRITE_EA, IARG_EXECUTING, IARG_END);
+                INS_InsertCall(ins, IPOINT_BEFORE,  PredStoreFuncPtr, IARG_FAST_ANALYSIS_CALL, IARG_THREAD_ID, IARG_MEMORYWRITE_EA, IARG_EXECUTING, IARG_MEMORYREAD_SIZE /*LOIS: track the size of the read*/, IARG_END);
             }
         }
 
         // Instrument only conditional branches
-        if (INS_Category(ins) == XED_CATEGORY_COND_BR) {
+/*        if (INS_Category(ins) == XED_CATEGORY_COND_BR) {
             INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR) IndirectRecordBranch, IARG_FAST_ANALYSIS_CALL, IARG_THREAD_ID,
                     IARG_INST_PTR, IARG_BRANCH_TAKEN, IARG_BRANCH_TARGET_ADDR, IARG_FALLTHROUGH_ADDR, IARG_END);
         }
+*/
     }
 
     //Intercept and process magic ops
@@ -575,7 +605,7 @@ VOID Instruction(INS ins) {
      * is never emitted by any x86 compiler, as they use other (recommended) nop
      * instructions or sequences.
      */
-    if (INS_IsXchg(ins) && INS_OperandReg(ins, 0) == REG_RCX && INS_OperandReg(ins, 1) == REG_RCX) {
+    if (INS_IsXchg(ins) && INS_OperandReg(ins, 0) == LEVEL_BASE::REG_RCX && INS_OperandReg(ins, 1) == LEVEL_BASE::REG_RCX) {
         //info("Instrumenting magic op");
         INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR) HandleMagicOp, IARG_THREAD_ID, IARG_REG_VALUE, REG_ECX, IARG_END);
     }
@@ -661,14 +691,16 @@ static uintptr_t vsyscallStart;
 static uintptr_t vsyscallEnd;
 static bool vsyscallWarned = false;
 
-void VdsoInsertFunc(IMG vi, const char* fName, VdsoFunc func) {
-    ADDRINT baseAddr = IMG_LowAddress(vi);
-    RTN rtn = RTN_FindByName(vi, fName);
-    if (rtn == RTN_Invalid()) {
+// Helper function from parse_vsdo.cpp
+extern void vdso_init_from_sysinfo_ehdr(uintptr_t base);
+extern void *vdso_sym(const char *version, const char *name);
+
+void VdsoInsertFunc(const char* fName, VdsoFunc func) {
+    ADDRINT vdsoFuncAddr = (ADDRINT) vdso_sym("LINUX_2.6", fName);
+    if (vdsoFuncAddr == 0) {
         warn("Did not find %s in vDSO", fName);
     } else {
-        ADDRINT rtnAddr = RTN_Address(rtn) - baseAddr + vdsoStart;
-        vdsoEntryMap[rtnAddr] = func;
+        vdsoEntryMap[vdsoFuncAddr] = func;
     }
 }
 
@@ -683,33 +715,21 @@ void VdsoInit() {
         return;
     }
 
-    // Write it out
-    std::stringstream file_ss;
-    file_ss << zinfo->outputDir << "/vdso.dso." << procIdx;
-    const char* file = file_ss.str().c_str();
-    FILE* vf = fopen(file, "w");
-    fwrite(reinterpret_cast<void*>(vdso.start), 1, vdsoEnd-vdsoStart, vf);
-    fclose(vf);
+    vdso_init_from_sysinfo_ehdr(vdsoStart);
 
-    // Load it and analyze it
-    IMG vi = IMG_Open(file);
-    if (!IMG_Valid(vi)) panic("Loaded vDSO not valid");
+    VdsoInsertFunc("clock_gettime", VF_CLOCK_GETTIME);
+    VdsoInsertFunc("__vdso_clock_gettime", VF_CLOCK_GETTIME);
 
-    VdsoInsertFunc(vi, "clock_gettime", VF_CLOCK_GETTIME);
-    VdsoInsertFunc(vi, "__vdso_clock_gettime", VF_CLOCK_GETTIME);
+    VdsoInsertFunc("gettimeofday", VF_GETTIMEOFDAY);
+    VdsoInsertFunc("__vdso_gettimeofday", VF_GETTIMEOFDAY);
 
-    VdsoInsertFunc(vi, "gettimeofday", VF_GETTIMEOFDAY);
-    VdsoInsertFunc(vi, "__vdso_gettimeofday", VF_GETTIMEOFDAY);
+    VdsoInsertFunc("time", VF_TIME);
+    VdsoInsertFunc("__vdso_time", VF_TIME);
 
-    VdsoInsertFunc(vi, "time", VF_TIME);
-    VdsoInsertFunc(vi, "__vdso_time", VF_TIME);
-
-    VdsoInsertFunc(vi, "getcpu", VF_GETCPU);
-    VdsoInsertFunc(vi, "__vdso_getcpu", VF_GETCPU);
+    VdsoInsertFunc("getcpu", VF_GETCPU);
+    VdsoInsertFunc("__vdso_getcpu", VF_GETCPU);
 
     info("vDSO info initialized");
-    IMG_Close(vi);
-    remove(file);
 
     Section vsyscall = FindSection("vsyscall");
     vsyscallStart = vsyscall.start;
@@ -794,11 +814,11 @@ VOID VdsoInstrument(INS ins) {
     if (unlikely(insAddr >= vdsoStart && insAddr < vdsoEnd)) {
         if (vdsoEntryMap.find(insAddr) != vdsoEntryMap.end()) {
             VdsoFunc func = vdsoEntryMap[insAddr];
-            INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR) VdsoEntryPoint, IARG_THREAD_ID, IARG_UINT32, (uint32_t)func, IARG_REG_VALUE, REG_RDI, IARG_REG_VALUE, REG_RSI, IARG_END);
+            INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR) VdsoEntryPoint, IARG_THREAD_ID, IARG_UINT32, (uint32_t)func, IARG_REG_VALUE, LEVEL_BASE::REG_RDI, IARG_REG_VALUE, LEVEL_BASE::REG_RSI, IARG_END);
         } else if (INS_IsCall(ins)) {
             INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR) VdsoCallPoint, IARG_THREAD_ID, IARG_END);
         } else if (INS_IsRet(ins)) {
-            INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR) VdsoRetPoint, IARG_THREAD_ID, IARG_REG_REFERENCE, REG_RAX /* return val */, IARG_END);
+            INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR) VdsoRetPoint, IARG_THREAD_ID, IARG_REG_REFERENCE, LEVEL_BASE::REG_RAX /* return val */, IARG_END);
         }
     }
 
@@ -1143,6 +1163,9 @@ VOID SimEnd() {
 #define ZSIM_MAGIC_OP_ROI_END           (1026)
 #define ZSIM_MAGIC_OP_REGISTER_THREAD   (1027)
 #define ZSIM_MAGIC_OP_HEARTBEAT         (1028)
+#define ZSIM_MAGIC_OP_FUNCTION_BEGIN    (1031)
+#define ZSIM_MAGIC_OP_FUNCTION_END      (1032)
+
 
 VOID HandleMagicOp(THREADID tid, ADDRINT op) {
     switch (op) {
@@ -1151,7 +1174,7 @@ VOID HandleMagicOp(THREADID tid, ADDRINT op) {
                 //TODO: Test whether this is thread-safe
                 futex_lock(&zinfo->ffLock);
                 if (procTreeNode->isInFastForward()) {
-                    info("ROI_BEGIN, exiting fast-forward");
+                    info("[ROI_BEGIN], exiting fast-forward");
                     ExitFastForward();
                 } else {
                     warn("Ignoring ROI_BEGIN magic op, not in fast-forward");
@@ -1200,13 +1223,18 @@ VOID HandleMagicOp(THREADID tid, ADDRINT op) {
         case ZSIM_MAGIC_OP_HEARTBEAT:
             procTreeNode->heartbeat(); //heartbeats are per process for now
             return;
-
+	case ZSIM_MAGIC_OP_FUNCTION_BEGIN:
+	    fPtrs[tid].OffloadBegin(tid);
+            return;
+	case ZSIM_MAGIC_OP_FUNCTION_END:
+            fPtrs[tid].OffloadEnd(tid);
+            return;
         // HACK: Ubik magic ops
         case 1029:
         case 1030:
-        case 1031:
-        case 1032:
-        case 1033:
+        //case 1031:
+        //case 1032:
+        //case 1033:
             return;
         default:
             panic("Thread %d issued unknown magic op %ld!", tid, op);

@@ -1,33 +1,36 @@
 /** $lic$
- * Copyright (C) 2012-2013 by Massachusetts Institute of Technology
- * Copyright (C) 2010-2012 by The Board of Trustees of Stanford University
+ * Copyright (C) 2012-2015 by Massachusetts Institute of Technology
+ * Copyright (C) 2010-2013 by The Board of Trustees of Stanford University
  *
  * This file is part of zsim.
  *
- * This is an internal version, and is not under GPL. All rights reserved.
- * Only MIT and Stanford students and faculty are allowed to use this version.
+ * zsim is free software; you can redistribute it and/or modify it under the
+ * terms of the GNU General Public License as published by the Free Software
+ * Foundation, version 2.
  *
  * If you use this software in your research, we request that you reference
  * the zsim paper ("ZSim: Fast and Accurate Microarchitectural Simulation of
- * Thousand-Core Systems", Sanchez and Kozyrakis, ISCA-40, June 2010) as the
+ * Thousand-Core Systems", Sanchez and Kozyrakis, ISCA-40, June 2013) as the
  * source of the simulator in any publications that use this software, and that
  * you send us a citation of your work.
  *
  * zsim is distributed in the hope that it will be useful, but WITHOUT ANY
  * WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
- * FOR A PARTICULAR PURPOSE.
+ * FOR A PARTICULAR PURPOSE. See the GNU General Public License for more
+ * details.
+ *
+ * You should have received a copy of the GNU General Public License along with
+ * this program. If not, see <http://www.gnu.org/licenses/>.
  */
 
 #ifndef PREFETCHER_H_
-#define PREFETCHER_H_
+#define PREFETCHER_H_ 
 
-#include <array>
 #include <bitset>
 #include "bithacks.h"
 #include "g_std/g_string.h"
 #include "memory_hierarchy.h"
 #include "stats.h"
-
 /* Prefetcher models: Basic operation is to interpose between cache levels, issue additional accesses,
  * and keep a small table with delays; when the demand access comes, we do it and account for the
  * latency as when it was first fetched (to avoid hit latencies on partial latency overlaps).
@@ -45,8 +48,6 @@ class SatCounter {
         bool pred() const { return count >= T; }
         uint32_t counter() const { return count; }
 };
-
-class PrefetchResponseEvent;
 
 /* This is basically a souped-up version of the DLP L2 prefetcher in Nehalem: 16 stream buffers,
  * but (a) no up/down distinction, and (b) strided operation based on dominant stride detection
@@ -72,11 +73,6 @@ class StreamPrefetcher : public BaseCache {
             AccessTimes times[64];
             std::bitset<64> valid;
 
-            // Weave-phase end-of-access event. Used to avoid early responses with weave models.
-            // Self-cleaning (PrefetchResponseEvent sets this to nullptr when it fires),
-            // so can't be stale.
-            std::array<PrefetchResponseEvent*, 64> respEvents;
-
             uint32_t lastPos;
             uint32_t lastLastPos;
             uint32_t lastPrefetchPos;
@@ -90,30 +86,28 @@ class StreamPrefetcher : public BaseCache {
                 lastPrefetchPos = 0;
                 conf.reset();
                 valid.reset();
-                respEvents.fill(nullptr);
                 lastCycle = curCycle;
             }
         };
 
         uint64_t timestamp;  // for LRU
-        Address* tag;
-        Entry* array;
+        Address tag[16];
+        Entry array[16];
 
         Counter profAccesses, profPrefetches, profDoublePrefetches, profPageHits, profHits, profShortHits, profStrideSwitches, profLowConfAccs;
 
-        MemObject* parent;
-        BaseCache* child;
+        //MemObject* parent;
+        g_vector<MemObject*> parents;
+        //BaseCache* child;
+        g_vector<BaseCache*> children;
         uint32_t childId;
         g_string name;
 
-        uint32_t numBuffers;
-        bool partitionBuffers; // partition stream buffer among data classes
-        uint32_t partitions;
-        static constexpr uint32_t MAX_PARTITIONS = 4;
+        uint32_t numparents;
+        uint32_t numchildren;
 
     public:
-        StreamPrefetcher(const g_string& _name, uint32_t _numBuffers, bool _partitionBuffers);
-        ~StreamPrefetcher();
+        explicit StreamPrefetcher(const g_string& _name) : timestamp(0), name(_name) {}
         void initStats(AggregateStat* parentStat);
         const char* getName() { return name.c_str();}
         void setParents(uint32_t _childId, const g_vector<MemObject*>& parents, Network* network);
@@ -121,8 +115,107 @@ class StreamPrefetcher : public BaseCache {
 
         uint64_t access(MemReq& req);
         uint64_t invalidate(const InvReq& req);
+        uint32_t getParentId(Address lineAddr) {
+            //Hash things a bit
+            uint32_t res = 0;
+            uint64_t tmp = lineAddr;
+            for (uint32_t i = 0; i < 4; i++) {
+                res ^= (uint32_t) ( ((uint64_t)0xffff) & tmp);
+                tmp = tmp >> 16;
+            }
+            return (res % parents.size());
+        }
+	// LOIS: offload
+        uint64_t offload(offloadInfo offData){
+            uint32_t parentId = getParentId(offData.ld_addr);
+            return parents[parentId]->offload(offData);
+        }
 
-        void simulatePrefetchResponse(PrefetchResponseEvent* ev, uint64_t cycle);
 };
 
-#endif  // PREFETCHER_H_
+// Access Map Pattern Matching (AMPM) prefetcher
+#define AMPM_PAGE_COUNT 64
+#define PREFETCH_DEGREE 1
+class AMPMPrefetcher: public BaseCache{
+    private:
+        typedef struct ampm_page
+        {
+            // page address
+            unsigned long long int page;
+
+            // The access map itself.
+            // Each element is set when the corresponding cache line is accessed.
+            // The whole structure is analyzed to make prefetching decisions.
+            // While this is coded as an integer array, it is used conceptually as a single 64-bit vector.
+            int access_map[64];
+
+            // This map represents cache lines in this page that have already been prefetched.
+            // We will only prefetch lines that haven't already been either demand accessed or prefetched.
+            int pf_map[64];
+
+            // used for page replacement
+            unsigned long long int lru;
+        } ampm_page_t;
+        ampm_page_t ampm_pages[AMPM_PAGE_COUNT];
+
+        uint64_t timestamp;  // for LRU
+
+        Counter profAccesses, profPrefetches, profDoublePrefetches, profPageHits, profHits, profShortHits, profStrideSwitches, profLowConfAccs;
+
+        //MemObject* parent;
+        g_vector<MemObject*> parents;
+        //BaseCache* child;
+        g_vector<BaseCache*> children;
+        uint32_t childId;
+        g_string name;
+
+        uint32_t numparents;
+        uint32_t numchildren;
+    public:
+        explicit AMPMPrefetcher(const g_string& _name) : timestamp(0), name(_name) {
+            printf("AMPM Lite Prefetcher\n");
+            // you can inspect these knob values from your code to see which configuration you're runnig in
+            /*      printf("Knobs visible from prefetcher: %d %d %d\n", knob_scramble_loads, knob_small_llc, knob_low_bandwidth);*/
+
+            int i;
+            for(i=0; i<AMPM_PAGE_COUNT; i++){
+                ampm_pages[i].page = 0;
+                ampm_pages[i].lru = 0;
+
+                int j;
+                for(j=0; j<64; j++){
+                    ampm_pages[i].access_map[j] = 0;
+                    ampm_pages[i].pf_map[j] = 0;
+                }
+            }
+        }
+
+
+        // void l2_prefetcher_operate(int cpu_num, unsigned long long int addr, unsigned long long int ip, int cache_hit)
+        //uint32_t access(Address addr, uint64_t curCycle, uint64_t dispatchCycle, uint64_t respCycle, FilterCache* l1d, OOOCoreRecorder* cRec);
+
+        void initStats(AggregateStat* parentStat);
+        const char* getName() { return name.c_str();}
+        void setParents(uint32_t _childId, const g_vector<MemObject*>& parents, Network* network);
+        void setChildren(const g_vector<BaseCache*>& children, Network* network);
+
+        uint64_t access(MemReq& req);
+        uint64_t invalidate(const InvReq& req);
+        uint32_t getParentId(Address lineAddr) {
+            //Hash things a bit
+            uint32_t res = 0;
+            uint64_t tmp = lineAddr;
+            for (uint32_t i = 0; i < 4; i++) {
+                res ^= (uint32_t) ( ((uint64_t)0xffff) & tmp);
+                tmp = tmp >> 16;
+            }
+            return (res % parents.size());
+        }
+	    // LOIS: offload
+        uint64_t offload(offloadInfo offData){
+            uint32_t parentId = getParentId(offData.ld_addr);
+            return parents[parentId]->offload(offData);
+        }
+};
+
+#endif  // 

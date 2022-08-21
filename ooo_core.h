@@ -34,11 +34,13 @@
 #include "memory_hierarchy.h"
 #include "ooo_core_recorder.h"
 #include "pad.h"
-
+#include <fstream>
+#include <mutex>
 // Uncomment to enable stall stats
 // #define OOO_STALL_STATS
 
 class FilterCache;
+
 
 /* 2-level branch predictor:
  *  - L1: Branch history shift registers (bshr): 2^NB entries, HB bits of history/entry, indexed by XOR'd PC
@@ -360,6 +362,19 @@ struct BblInfo;
 
 class OOOCore : public Core {
     private:
+	uint32_t coreIdx; // LOIS: for offloading
+        uint32_t threadIdx; // LOIS: for offloading
+        std::ofstream tracefile; // for generating trace file
+        uint64_t offload_code;
+        uint64_t function_offload_instructions;
+        bool  only_offload, pim_trace, instr_trace; // generates the trace in the core or in the MC
+        bool ptrace, print_trace;
+        uint64_t previous_instr; // count instructions between memory operations
+    	uint64_t offload_instrs;
+        bool merge_hostTraces;
+        static std::mutex mtx_traces;
+        static bool file_created; 
+        uint64_t total_missing_instructions; // for debugging
         FilterCache* l1i;
         FilterCache* l1d;
 
@@ -373,9 +388,11 @@ class OOOCore : public Core {
         //Record load and store addresses
         Address loadAddrs[256];
         Address storeAddrs[256];
+        uint32_t loadSizes[256];
+        uint32_t storeSizes[256];
         uint32_t loads;
         uint32_t stores;
-
+        
         uint64_t lastStoreCommitCycle;
         uint64_t lastStoreAddrCommitCycle; //tracks last store addr uop, all loads queue behind it
 
@@ -415,6 +432,9 @@ class OOOCore : public Core {
 
         uint64_t instrs, uops, bbls, approxInstrs, mispredBranches;
 
+	uint64_t inter_instrs; // LOIS: to count instructions between memory accesses
+
+
 #ifdef OOO_STALL_STATS
         Counter profFetchStalls, profDecodeStalls, profIssueStalls;
 #endif
@@ -435,12 +455,36 @@ class OOOCore : public Core {
 
     public:
         OOOCore(FilterCache* _l1i, FilterCache* _l1d, g_string& _name);
+        OOOCore(FilterCache* _l1i, FilterCache* _l1d, g_string& _name, bool only_offload);
+        OOOCore(FilterCache* _l1i, FilterCache* _l1d, g_string& _name, bool only_offload, bool instr_trace_, g_string& _outFile, bool merge_hostTraces);
+        ~OOOCore(){
+            if(pim_trace) 
+              tracefile.close();
+        }
+        // LOIS
+        void offloadFunction_begin() { 
+          //printf("offloadFunction_begin: %d\n", coreIdx);
+	  function_offload_instructions = 0;
+          offload_code++; 
+        }
+        void offloadFunction_end() { 
+          offload_code--;
+	  if(offload_code == 0){
+           // printf("[C%d] instrs: %ld\n", coreIdx, function_offload_instructions);
+	    function_offload_instructions = 0;
+	  } 
+        }
+        int get_offload_code() { 
+          if(only_offload) return offload_code;
+          return 1;// track all code 
+        }
 
         void initStats(AggregateStat* parentStat);
 
         uint64_t getInstrs() const;
         uint64_t getPhaseCycles() const;
         uint64_t getCycles() const {return cRec.getUnhaltedCycles(curCycle);}
+	uint64_t getOffloadInstrs() const; //LOIS
 
         void contextSwitch(int32_t gid);
 
@@ -455,8 +499,8 @@ class OOOCore : public Core {
         void cSimEnd();
 
     private:
-        inline void load(Address addr);
-        inline void store(Address addr);
+        inline void load(Address addr, uint32_t size);
+        inline void store(Address addr, uint32_t size);
 
         /* NOTE: Analysis routines cannot touch curCycle directly, must use
          * advance() for long jumps or insWindow.advancePos() for 1-cycle
@@ -475,11 +519,15 @@ class OOOCore : public Core {
         inline void branch(Address pc, bool taken, Address takenNpc, Address notTakenNpc);
 
         inline void bbl(Address bblAddr, BblInfo* bblInfo);
+	inline void bbl_offload(/*Address bblAddr, BblInfo* bblInfo*/);
+	inline void bbl_offload_mc(Address bblAddr, BblInfo* bblInfo);
 
-        static void LoadFunc(THREADID tid, ADDRINT addr);
-        static void StoreFunc(THREADID tid, ADDRINT addr);
-        static void PredLoadFunc(THREADID tid, ADDRINT addr, BOOL pred);
-        static void PredStoreFunc(THREADID tid, ADDRINT addr, BOOL pred);
+        static void OffloadBegin(THREADID tid);
+        static void OffloadEnd(THREADID tid);
+        static void LoadFunc(THREADID tid, ADDRINT addr, UINT32 size);
+        static void StoreFunc(THREADID tid, ADDRINT addr, UINT32 size);
+        static void PredLoadFunc(THREADID tid, ADDRINT addr, BOOL pred, UINT32 size);
+        static void PredStoreFunc(THREADID tid, ADDRINT addr, BOOL pred, UINT32 size);
         static void BblFunc(THREADID tid, ADDRINT bblAddr, BblInfo* bblInfo);
         static void BranchFunc(THREADID tid, ADDRINT pc, BOOL taken, ADDRINT takenNpc, ADDRINT notTakenNpc);
 } ATTR_LINE_ALIGNED;  // Take up an int number of cache lines

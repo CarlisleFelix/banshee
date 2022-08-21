@@ -38,7 +38,6 @@ const char* Cache::getName() {
 }
 
 void Cache::setParents(uint32_t childId, const g_vector<MemObject*>& parents, Network* network) {
-	//printf("name = %s, parents.size()=%ld\n", name.c_str(), parents.size());
     cc->setParents(childId, parents, network);
 }
 
@@ -76,7 +75,6 @@ uint64_t Cache::access(MemReq& req) {
             //Evictions are not in the critical path in any sane implementation -- we do not include their delays
             //NOTE: We might be "evicting" an invalid line for all we know. Coherence controllers will know what to do
             cc->processEviction(req, wbLineAddr, lineId, respCycle); //1. if needed, send invalidates/downgrades to lower level
-
             array->postinsert(req.lineAddr, &req, lineId); //do the actual insertion. NOTE: Now we must split insert into a 2-phase thing because cc unlocks us.
         }
         // Enforce single-record invariant: Writeback access may have a timing
@@ -140,3 +138,8 @@ uint64_t Cache::finishInvalidate(const InvReq& req) {
 
     return respCycle;
 }
+
+uint64_t Cache::offload(offloadInfo offData){
+    return cc->offload(offData);
+}
+

@@ -327,6 +327,8 @@ class MemControllerBase : public MemObject {
         void initStats(AggregateStat* parentStat);
         void updateStats(void);
         void finish(void);
+	// LOIS: not supported
+	uint64_t offload(offloadInfo offData){assert(0);}
 };
 
 // DRAM access event base class

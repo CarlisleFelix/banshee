@@ -28,54 +28,7 @@
 #include "mem_ctrls.h"
 #include "zsim.h"
 
-
-SimpleMemory::SimpleMemory(uint32_t _latency, g_string& _name, Config& config) 
-	: name(_name)
-	, latency(_latency) 
-{
-	// trace is collected in mc.cpp.  
-	_collect_trace = false;
-	_cur_trace_len = 0;
-	_max_trace_len = 10000;
-//	temp = new char[200];
-	temp = nullptr;
-	_trace_dir = config.get<const char *>("sys.mem.traceDir", "./");
-	//_address_trace = new Address[_max_trace_len]; 
-	//_type_trace = new uint32_t[_max_trace_len];
-	if (_collect_trace) {
-		FILE * f = fopen((_trace_dir + g_string("/") + name + g_string("trace.bin")).c_str(), "wb");
-		uint32_t num = 0;
-		fwrite(&num, sizeof(uint32_t), 1, f);
-		fclose(f);
-	    futex_init(&_lock);
-	}
-}
-
 uint64_t SimpleMemory::access(MemReq& req) {
-	if (_collect_trace) {
-	    futex_lock(&_lock);
-		_address_trace[_cur_trace_len] = req.lineAddr;
-		_type_trace[_cur_trace_len] = (req.type == PUTS || req.type == PUTX)? 1 : 0;
-		_cur_trace_len ++;
-		assert(_cur_trace_len <= _max_trace_len);
-		if (_cur_trace_len == _max_trace_len) {
-			FILE * f = fopen((_trace_dir + g_string("/") + name + g_string("trace.bin")).c_str(), "ab");
-			fwrite(_address_trace, sizeof(Address), _max_trace_len, f);
-			fwrite(_type_trace, sizeof(uint32_t), _max_trace_len, f);
-			fclose(f);
-			_cur_trace_len = 0;
-		}
-	    futex_unlock(&_lock);
-	}
-/*	if (temp == nullptr) {
-		//temp = std::new char[2000];
-		temp = (Chunk *) malloc(sizeof(Chunk));
-		for (uint32_t i = 0; i < 2000; i++)
-			temp->a[i] = 1;
-	} else { 
-		int a = temp->a[rand() % 1000 ];
-		printf("a = %d\n", a);
-	}*/
     switch (req.type) {
         case PUTS:
         case PUTX:
@@ -89,9 +42,10 @@ uint64_t SimpleMemory::access(MemReq& req) {
             break;
         default: panic("!?");
     }
-
+    
     uint64_t respCycle = req.cycle + latency;
     assert(respCycle > req.cycle);
+
 /*
     if ((req.type == GETS || req.type == GETX) && eventRecorders[req.srcId]) {
         Address addr = req.lineAddr<<lineBits;
@@ -103,8 +57,99 @@ uint64_t SimpleMemory::access(MemReq& req) {
     return respCycle;
 }
 
+uint64_t MemoryTraces::access(MemReq& req) {
+    assert(req.coreId <= MAX_CORES)//LOIS
+    switch (req.type) {
+        case PUTX:
+            //LOIS (write back)
+            //printf("writeback!\n");
+        case PUTS:
+            *req.state = I;
+            break;
+        case GETS:
+            *req.state = req.is(MemReq::NOEXCL)? S : E;
+            //LOIS
+            if(print_trace){
+	        futex_lock(&traceLock);
+		if(!req.is(MemReq::IFETCH)){
+			if((!req.is(MemReq::PREFETCH_TRACE)) && (!req.is(MemReq::PREFETCH))) substract[req.coreId]++; 
+			int64_t pinstr = previous_instr[req.coreId];
+			if( (pinstr - substract[req.coreId]) <= 0) {
+				substract[req.coreId] = substract[req.coreId] - pinstr;
+				pinstr = 0;
+			}else{
+				pinstr = pinstr - substract[req.coreId];
+				substract[req.coreId] = 0;
+			}
+			if(req.is(MemReq::PREFETCH_TRACE) || req.is(MemReq::PREFETCH)) tracefile << threadIdx[req.coreId] << " " << req.coreId << " " << pinstr << " P " << req.lineAddr << std::endl;
+			else tracefile  << threadIdx[req.coreId] << " " << req.coreId  << " " << pinstr << " L " << req.lineAddr << std::endl;
+			previous_instr[req.coreId] = 0;
+		}
+		futex_unlock(&traceLock);        
+            }
+            break;
+        case GETX:
+            *req.state = M;
+            //LOIS
+	    if(print_trace){
+		    futex_lock(&traceLock);        
+		    if(!req.is(MemReq::IFETCH)){
+			    int64_t pinstr = previous_instr[req.coreId];
+			    if((!req.is(MemReq::PREFETCH_TRACE)) && (!req.is(MemReq::PREFETCH))) substract[req.coreId]++;
+			    if( (pinstr - substract[req.coreId] ) <= 0) {
+				    substract[req.coreId] = substract[req.coreId] - pinstr;
+				    pinstr = 0;
+			    }else{
+				    pinstr = pinstr - substract[req.coreId];
+				    substract[req.coreId] = 0;
+			    }
+			    if(req.is(MemReq::PREFETCH_TRACE) || req.is(MemReq::PREFETCH)) tracefile << threadIdx[req.coreId]<< " " << req.coreId << " " << pinstr << " P " << req.lineAddr << std::endl;
+			    else  tracefile << threadIdx[req.coreId]<< " " << req.coreId << " " << pinstr << " S " << req.lineAddr << std::endl;
+			    previous_instr[req.coreId] = 0;
+		    }
+		    futex_unlock(&traceLock);        
+	    }
+            break;
+        
+        default: panic("!?");
+    }
+    
+    //if(req.is(MemReq::PREFETCH)) printf("PREFETCH\n");
+    uint64_t respCycle = req.cycle + latency;
+    assert(respCycle > req.cycle);
 
+/*
+    if ((req.type == GETS || req.type == GETX) && eventRecorders[req.srcId]) {
+        Address addr = req.lineAddr<<lineBits;
+        MemAccReqEvent* memEv = new (eventRecorders[req.srcId]->alloc<MemAccReqEvent>()) MemAccReqEvent(nullptr, false, addr);
+        TimingRecord tr = {addr, req.cycle, respCycle, req.type, memEv, memEv};
+        eventRecorders[req.srcId]->pushRecord(tr);
+    }
+*/
+    return respCycle;
+}
 
+// LOIS: print memory traces
+// Deprecated: no these traces are printed in the processor
+uint64_t MemoryTraces::offload(offloadInfo offData){
+  if(offData.msg == OFFLOADING){
+  	print_trace = offData.content;
+        //if(print_trace < 0) print_trace = 0;  
+	//printf("offloading: %ld\n", offData.content);
+  } else if(offData.msg == INSTR_COUNT){
+	//printf("core: %ld instrs: %ld\n", offData.coreIdx, offData.inter_instrs);
+	futex_lock(&traceLock);        
+	previous_instr[offData.coreIdx] += offData.inter_instrs;
+	total_instructions += offData.inter_instrs;
+	//printf("tota instructions: %lld\n",(long long int)total_instructions);
+	threadIdx[offData.coreIdx] = offData.threadIdx;
+	futex_unlock(&traceLock);        
+
+  }
+        
+
+  return 0;
+}
 
 MD1Memory::MD1Memory(uint32_t requestSize, uint32_t megacyclesPerSecond, uint32_t megabytesPerSecond, uint32_t _zeroLoadLatency, g_string& _name)
     : zeroLoadLatency(_zeroLoadLatency), name(_name)

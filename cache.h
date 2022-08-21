@@ -70,7 +70,8 @@ class Cache : public BaseCache {
             startInvalidate();
             return finishInvalidate(req);
         }
-
+	uint64_t offload(offloadInfo offData);
+	
     protected:
         void initCacheStats(AggregateStat* cacheStat);
 

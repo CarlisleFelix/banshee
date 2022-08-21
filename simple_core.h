@@ -46,9 +46,11 @@ class SimpleCore : public Core {
 
     public:
         SimpleCore(FilterCache* _l1i, FilterCache* _l1d, g_string& _name);
+        
         void initStats(AggregateStat* parentStat);
 
         uint64_t getInstrs() const {return instrs;}
+        uint64_t getOffloadInstrs() const {return 0;}
         uint64_t getPhaseCycles() const;
         uint64_t getCycles() const {return curCycle - haltedCycles;}
 
@@ -63,11 +65,18 @@ class SimpleCore : public Core {
         inline void store(Address addr);
         inline void bbl(Address bblAddr, BblInfo* bblInstrs);
 
-        static void LoadFunc(THREADID tid, ADDRINT addr);
-        static void StoreFunc(THREADID tid, ADDRINT addr);
+        // LOIS: TODO: offloaded code
+        void offloadFunction_begin() { }
+        void offloadFunction_end() { }
+        int get_offload_code() { return 0; }
+
+        static void OffloadBegin(THREADID tid);
+        static void OffloadEnd(THREADID tid);
+        static void LoadFunc(THREADID tid, ADDRINT addr, UINT32 size);
+        static void StoreFunc(THREADID tid, ADDRINT addr, UINT32 size);
         static void BblFunc(THREADID tid, ADDRINT bblAddr, BblInfo* bblInfo);
-        static void PredLoadFunc(THREADID tid, ADDRINT addr, BOOL pred);
-        static void PredStoreFunc(THREADID tid, ADDRINT addr, BOOL pred);
+        static void PredLoadFunc(THREADID tid, ADDRINT addr, BOOL pred, UINT32 size);
+        static void PredStoreFunc(THREADID tid, ADDRINT addr, BOOL pred, UINT32 size);
 
         static void BranchFunc(THREADID, ADDRINT, BOOL, ADDRINT, ADDRINT) {}
 }  ATTR_LINE_ALIGNED; //This needs to take up a whole cache line, or false sharing will be extremely frequent

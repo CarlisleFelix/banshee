@@ -343,7 +343,7 @@ void Scheduler::futexWakeJoin(ThreadInfo* th) {  // may release schedLock
     assert(wokenUp <= maxWakes);
     maxAllowedFutexWakeups -= (maxWakes - wokenUp);
 
-    assert(unmatchedFutexWakeups <= maxAllowedFutexWakeups); // should panic...
+    //assert(unmatchedFutexWakeups <= maxAllowedFutexWakeups); // should panic...
 
     DEBUG_FUTEX("Futex wake matching %d %d", unmatchedFutexWakeups, maxAllowedFutexWakeups);
 

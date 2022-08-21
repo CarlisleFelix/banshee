@@ -30,9 +30,7 @@
 #include "cache.h"
 #include "galloc.h"
 #include "zsim.h"
-#include "g_std/g_unordered_map.h"
-#include "g_std/g_unordered_set.h"
-#include "config.h"
+
 /* Extends Cache with an L0 direct-mapped cache, optimized to hell for hits
  *
  * L1 lookups are dominated by several kinds of overhead (grab the cache locks,
@@ -62,14 +60,10 @@ class FilterCache : public Cache {
 
         lock_t filterLock;
         uint64_t fGETSHit, fGETXHit;
-		// this is not an accurate tlb. It just randomize the page nums   
-		bool _enable_tlb;
-		drand48_data _buffer;
-		g_unordered_map <Address, Address> _tlb;
-		g_unordered_set <Address> _exist_pgnum; 
+
     public:
         FilterCache(uint32_t _numSets, uint32_t _numLines, CC* _cc, CacheArray* _array,
-                ReplPolicy* _rp, uint32_t _accLat, uint32_t _invLat, g_string& _name, Config &config)
+                ReplPolicy* _rp, uint32_t _accLat, uint32_t _invLat, g_string& _name)
             : Cache(_numLines, _cc, _array, _rp, _accLat, _invLat, _name)
         {
             numSets = _numSets;
@@ -80,8 +74,6 @@ class FilterCache : public Cache {
             fGETSHit = fGETXHit = 0;
             srcId = -1;
             reqFlags = 0;
-			_enable_tlb = config.get<bool>("sim.enableTLB", false);
-			srand48_r((uint64_t)this, &_buffer);
         }
 
         void setSourceId(uint32_t id) {
@@ -107,7 +99,7 @@ class FilterCache : public Cache {
             parentStat->append(cacheStat);
         }
 
-        inline uint64_t load(Address vAddr, uint64_t curCycle) {
+        inline uint64_t load(Address vAddr, uint64_t curCycle, uint64_t instrs) {
             Address vLineAddr = vAddr >> lineBits;
             uint32_t idx = vLineAddr & setMask;
             uint64_t availCycle = filterArray[idx].availCycle; //read before, careful with ordering to avoid timing races
@@ -115,11 +107,11 @@ class FilterCache : public Cache {
                 fGETSHit++;
                 return MAX(curCycle, availCycle);
             } else {
-                return replace(vLineAddr, idx, true, curCycle);
+                return replace(vLineAddr, idx, true, curCycle, instrs);
             }
         }
 
-        inline uint64_t store(Address vAddr, uint64_t curCycle) {
+        inline uint64_t store(Address vAddr, uint64_t curCycle, uint64_t instrs) {
             Address vLineAddr = vAddr >> lineBits;
             uint32_t idx = vLineAddr & setMask;
             uint64_t availCycle = filterArray[idx].availCycle; //read before, careful with ordering to avoid timing races
@@ -129,32 +121,15 @@ class FilterCache : public Cache {
                 //filterArray[idx].availCycle = curCycle; //do optimistic store-load forwarding
                 return MAX(curCycle, availCycle);
             } else {
-                return replace(vLineAddr, idx, false, curCycle);
+                return replace(vLineAddr, idx, false, curCycle, instrs);
             }
         }
 
-        uint64_t replace(Address vLineAddr, uint32_t idx, bool isLoad, uint64_t curCycle) {
-			Address pLineAddr;
-			// page num = vLineAddr shifted by 6 bits. So it is shifted by 12 bits in total (4KB page size)
-			if (_enable_tlb) {
-				Address vpgnum = vLineAddr >> 6; 
-				uint64_t pgnum;
-        	    futex_lock(&filterLock);
-				if (_tlb.find(vpgnum) == _tlb.end()) {
-					do {
-						int64_t rand;
-						lrand48_r(&_buffer, &rand);
-						pgnum = rand & 0x000fffffffffffff;
-					} while (_exist_pgnum.find(pgnum) != _exist_pgnum.end());
-					_tlb[vpgnum] = pgnum;
-					_exist_pgnum.insert( pgnum );
-				} else 
-					pgnum = _tlb[vpgnum];	
-				pLineAddr = procMask | (pgnum << 6) | (vLineAddr & 0x3f); 
-			} else 
-            	pLineAddr = procMask | vLineAddr;
+        uint64_t replace(Address vLineAddr, uint32_t idx, bool isLoad, uint64_t curCycle, uint64_t instrs) {
+            Address pLineAddr = procMask | vLineAddr;
             MESIState dummyState = MESIState::I;
-            MemReq req = {pLineAddr, isLoad? GETS : GETX, 0, &dummyState, curCycle, &filterLock, dummyState, srcId, reqFlags};
+            futex_lock(&filterLock);
+            MemReq req = {pLineAddr, isLoad? GETS : GETX, 0, &dummyState, curCycle, &filterLock, dummyState, srcId, reqFlags, instrs, srcId};
             uint64_t respCycle  = access(req);
 
             //Due to the way we do the locking, at this point the old address might be invalidated, but we have the new address guaranteed until we release the lock
@@ -191,6 +166,7 @@ class FilterCache : public Cache {
             for (uint32_t i = 0; i < numSets; i++) filterArray[i].clear();
             futex_unlock(&filterLock);
         }
+	
 };
 
 #endif  // FILTER_CACHE_H_

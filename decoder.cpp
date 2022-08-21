@@ -514,7 +514,6 @@ bool Decoder::decodeInstr(INS ins, DynUopVec& uops) {
         emitFence(uops, 0); //serialize the initial load w.r.t. all prior stores
     }
 
-
     switch (category) {
         //NOPs are optimized out in the execution pipe, but they still grab a ROB entry
         case XC(NOP):
@@ -711,13 +710,16 @@ bool Decoder::decodeInstr(INS ins, DynUopVec& uops) {
         /* FP, SSE and other extensions */
         case /*XC(X)87_ALU*/ XC(X87_ALU):
             //emitBasicOp(instr, uops, 1, PORTS_015);
+            printf("X87_ALU\n");
             break;
 
         case XED_CATEGORY_3DNOW:
+            printf("XED_CATEGORY_3DNOW\n");
             //emitBasicOp(instr, uops, 1, PORTS_015);
             break;
 
         case XC(MMX):
+            printf("MMX\n");
             //emitBasicOp(instr, uops, 1, PORTS_015);
             break;
 
@@ -911,6 +913,7 @@ bool Decoder::decodeInstr(INS ins, DynUopVec& uops) {
             break;
 
         case XC(STTNI): //SSE 4.2
+            printf("SSE 4.2\n");
             break;
 
         case XC(CONVERT): //part of SSE
@@ -975,20 +978,25 @@ bool Decoder::decodeInstr(INS ins, DynUopVec& uops) {
 
         case XC(AVX):
             //TODO: Whatever, Nehalem has no AVX
+            printf("AVX\n");
             break;
 
         case XC(BROADCAST): //part of AVX
             //TODO: Same as AVX
+            printf("BROADCAST AVX\n");
             break;
 
         case XC(AES):
+            printf("AES\n");
             break;
 
         case XC(PCLMULQDQ): //CLMUL extension (carryless multiply, generally related to AES-NI)
+            printf("PCLMULQDQ\n");
             break;
 
         case XC(XSAVE):
         case XC(XSAVEOPT): //hold your horses, it's optimized!! (AVX)
+            printf("XSAVE\n");
             break;
 
         /* Control flow ops (branches, jumps) */

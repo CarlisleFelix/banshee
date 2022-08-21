@@ -30,31 +30,76 @@
 #include "memory_hierarchy.h"
 #include "pad.h"
 #include "stats.h"
-#include "config.h"
+
+//LOIS
+#include <iostream>
+#include <fstream>
+#define MAX_CORES 1024
 
 /* Simple memory (or memory bank), has a fixed latency */
 class SimpleMemory : public MemObject {
     private:
-		bool _collect_trace;
-		g_string _trace_dir;
-
         g_string name;
         uint32_t latency;
-		Address _address_trace[10000];
-		uint32_t _type_trace[10000];
-		uint32_t _cur_trace_len;
-		uint32_t _max_trace_len;
-
-		struct Chunk {
-			char a[2000];
-		};
-	
-		lock_t _lock;
-		Chunk * temp;
     public:
         uint64_t access(MemReq& req);
+
         const char* getName() {return name.c_str();}
-        SimpleMemory(uint32_t _latency, g_string& _name, Config& config);
+
+        SimpleMemory(uint32_t _latency, g_string& _name) : name(_name), latency(_latency) {}
+
+	// LOIS: not supported
+	uint64_t offload(offloadInfo offData){ return 100;}
+};
+
+/* Traces for Ramulator */
+class MemoryTraces : public MemObject {
+    private:
+        g_string name;
+        uint32_t latency;
+        std::ofstream tracefile;
+        bool only_offload;
+        int print_trace;
+	lock_t traceLock;
+        //Address previous_rdaddr[MAX_CORES];
+        uint64_t previous_instr[MAX_CORES]; 
+        int64_t substract[MAX_CORES]; 
+        uint64_t threadIdx[MAX_CORES];
+	//uint64_t previous_count[MAX_CORES]; 
+	uint64_t previous_instructions = 0;
+	uint64_t total_instructions = 0;
+
+    public:
+        uint64_t access(MemReq& req);
+
+        const char* getName() {return name.c_str();}
+        
+         MemoryTraces(uint32_t _latency, g_string& _name, bool only_offload_, g_string& _outFile) : name(_name), latency(_latency) {
+            //LOIS: create the trace file
+            tracefile.open (_outFile.c_str());
+            only_offload = only_offload_;
+            if(only_offload) print_trace = 0;
+            else print_trace = 1;
+	    for(int i = 0; i < MAX_CORES; i++) {
+                //previous_rdaddr[i] = 0;
+                previous_instr[i] = 0; 
+		substract[i] = 0;
+                //previous_count[i] = 0;
+            }
+	    futex_init(&traceLock); 
+       }
+        
+        MemoryTraces(uint32_t _latency, g_string& _name) : name(_name), latency(_latency) {
+        }
+        
+        //LOIS
+        ~MemoryTraces(){
+            tracefile.close();
+        }
+
+	// LOIS
+	uint64_t offload(offloadInfo offData);
+
 };
 
 
@@ -102,6 +147,9 @@ class MD1Memory : public MemObject {
 
         //uint32_t access(Address lineAddr, AccessType type, uint32_t childId, MESIState* state /*both input and output*/, MESIState initialState, lock_t* childLock);
         uint64_t access(MemReq& req);
+
+	// LOIS: not supported
+	uint64_t offload(offloadInfo offData){assert(0); return 100;}
 
         const char* getName() {return name.c_str();}
 

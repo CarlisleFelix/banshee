@@ -1,74 +1,58 @@
 /** $lic$
- * Copyright (C) 2012-2013 by Massachusetts Institute of Technology
- * Copyright (C) 2010-2012 by The Board of Trustees of Stanford University
+ * Copyright (C) 2012-2015 by Massachusetts Institute of Technology
+ * Copyright (C) 2010-2013 by The Board of Trustees of Stanford University
  *
  * This file is part of zsim.
  *
- * This is an internal version, and is not under GPL. All rights reserved.
- * Only MIT and Stanford students and faculty are allowed to use this version.
+ * zsim is free software; you can redistribute it and/or modify it under the
+ * terms of the GNU General Public License as published by the Free Software
+ * Foundation, version 2.
  *
  * If you use this software in your research, we request that you reference
  * the zsim paper ("ZSim: Fast and Accurate Microarchitectural Simulation of
- * Thousand-Core Systems", Sanchez and Kozyrakis, ISCA-40, June 2010) as the
+ * Thousand-Core Systems", Sanchez and Kozyrakis, ISCA-40, June 2013) as the
  * source of the simulator in any publications that use this software, and that
  * you send us a citation of your work.
  *
  * zsim is distributed in the hope that it will be useful, but WITHOUT ANY
  * WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
- * FOR A PARTICULAR PURPOSE.
+ * FOR A PARTICULAR PURPOSE. See the GNU General Public License for more
+ * details.
+ *
+ * You should have received a copy of the GNU General Public License along with
+ * this program. If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include "prefetcher.h"
 #include "bithacks.h"
-//#include "jigsaw_runtime.h"
-#include "network.h"
 
-#include "event_recorder.h"
-#include "timing_event.h"
-#include "zsim.h"
+//#define DBG(args...) info(args)
+#define DBG(args...)
 
-#define DBG(args...) //info(args)
+#define LQ_THRESHOLD 32
 
-class PrefetchResponseEvent : public TimingEvent {
-    private:
-        StreamPrefetcher* pf;
-    public:
-        const uint32_t idx;
-        const uint32_t prefetchPos;
 
-    public:
-        PrefetchResponseEvent(StreamPrefetcher* _pf, uint32_t _idx, uint32_t _prefetchPos, int32_t domain) :
-            TimingEvent(0, 0, domain), pf(_pf), idx(_idx), prefetchPos(_prefetchPos) {}
-
-        void simulate(uint64_t startCycle) {
-            pf->simulatePrefetchResponse(this, startCycle);
-            done(startCycle);
-        }
-};
-
-StreamPrefetcher::StreamPrefetcher(const g_string& _name, uint32_t _numBuffers, bool _partitionBuffers)
-    : timestamp(0), name(_name), numBuffers(_numBuffers), partitionBuffers(_partitionBuffers), partitions(1)
-{
-    tag = gm_calloc<Address>(numBuffers);
-    array = gm_calloc<Entry>(numBuffers);
-}
-
-StreamPrefetcher::~StreamPrefetcher() {
-    gm_free(tag);
-    gm_free(array);
-}
-
-void StreamPrefetcher::setParents(uint32_t _childId, const g_vector<MemObject*>& parents, Network* network) {
+void StreamPrefetcher::setParents(uint32_t _childId, const g_vector<MemObject*>& _parents, Network* network) {
     childId = _childId;
-    if (parents.size() != 1) panic("Must have one parent, %ld passed", parents.size());
-    parent = parents[0];
-    if (network && network->getRTT(name.c_str(), parent->getName())) panic("Network not handled (non-zero delay with parent)");
+    printf("----[StreamPrefetcher] Parents: %d\n",_parents.size());
+    //if (parents.size() != 1) panic("Must have one parent");
+    if (network) panic("Network not handled");
+    //parent = parents[0];
+    numparents = _parents.size();
+    for(int i = 0; i < numparents; i++){
+        parents.push_back(_parents[i]);
+    }
 }
 
-void StreamPrefetcher::setChildren(const g_vector<BaseCache*>& children, Network* network) {
-    if (children.size() != 1) panic("Must have one child, %ld passed", children.size());
-    child = children[0];
-    if (network && network->getRTT(name.c_str(), child->getName())) panic("Network not handled (non-zero delay with child)");
+void StreamPrefetcher::setChildren(const g_vector<BaseCache*>& _children, Network* network) {
+    printf("---- Chidren: %d\n", _children.size());
+    if (_children.size() != 1) panic("Must have one children");
+    if (network) panic("Network not handled");
+    numchildren = _children.size();
+    for(int i = 0; i < numchildren; i++){
+        children.push_back(_children[i]);
+    }
+    //child = _children[0];
 }
 
 void StreamPrefetcher::initStats(AggregateStat* parentStat) {
@@ -89,92 +73,31 @@ uint64_t StreamPrefetcher::access(MemReq& req) {
     uint32_t origChildId = req.childId;
     req.childId = childId;
 
-    if (req.type != GETS) return parent->access(req); //other reqs ignored, including stores
+    uint32_t parentId = getParentId(req.lineAddr);
+    if (req.type != GETS) return parents[parentId]->access(req); //other reqs ignored, including stores
 
     profAccesses.inc();
 
     uint64_t reqCycle = req.cycle;
-    uint64_t respCycle = parent->access(req);
-
-    EventRecorder* evRec = zinfo->eventRecorders[req.srcId];
-    TimingRecord acc;
-    acc.clear();
-    if (unlikely(evRec && evRec->hasRecord())) {
-        acc = evRec->popRecord();
-    }
-
-    // For performance reasons, we don't want to initialize acc and push a
-    // TimingRecord down to the core every access.  Many accesses don't result
-    // in prefetches or prefetch-hits, and don't generate timing events. This
-    // lambda is called only when acc is needed, and can be safely called
-    // multiple times.
-    auto initAcc = [&]() {
-        // Massage acc TimingRecord, which may or may not be valid
-        if (acc.isValid()) {  // Due to the demand access or a previous prefetch
-            if (acc.reqCycle > reqCycle) {
-                DelayEvent* dUpEv = new (evRec) DelayEvent(acc.reqCycle - reqCycle);
-                dUpEv->setMinStartCycle(reqCycle);
-                dUpEv->addChild(acc.startEvent, evRec);
-                acc.reqCycle = reqCycle;
-                acc.startEvent = dUpEv;
-            }
-        } else {
-            // Create fixed-delay start and end events, so that we can pass a TimingRecord
-            // to the core (we always want to pass a TimingRecord if we issue prefetch accesses,
-            // so that we account for latencies correctly even with skews)
-            DelayEvent* startEv = new (evRec) DelayEvent(respCycle - reqCycle);
-            startEv->setMinStartCycle(reqCycle);
-            DelayEvent* endEv = new (evRec) DelayEvent(0);
-            endEv->setMinStartCycle(respCycle);
-            startEv->addChild(endEv, evRec);
-            acc = {req.lineAddr, reqCycle, respCycle, req.type, startEv, endEv};
-            assert(acc.isValid());
-        }
-        // Now acc is valid & startEvent is always at reqCycle
-    };
+    uint64_t respCycle = parents[parentId]->access(req);
 
     Address pageAddr = req.lineAddr >> 6;
-    uint32_t startEntry, endEntry;
-
-    if (likely(!partitionBuffers)) {
-        startEntry = 0;
-        endEntry = numBuffers;
-    } else {
-		assert(false);
-/*        //assert_msg(zinfo->jsr != nullptr, "need jigsaw runtime for page to share mappings");
-
-        uint32_t share = zinfo->jsr->getPageToShare(pageAddr);
-        if (share == (uint32_t)-1) share = 0;
-
-        assert(share < MAX_PARTITIONS); // FIXME we support max four partitions for now
-        if (share + 1 > partitions) {
-            info("updated partitions %u", partitions);
-            partitions = share + 1;
-        }
-
-        // Divide the stream buffers equally among partitions 
-        startEntry = numBuffers/partitions*(share);
-        endEntry = numBuffers/partitions*(share + 1);
-*/
-    }
-
     uint32_t pos = req.lineAddr & (64-1);
-    uint32_t idx = numBuffers;
-
+    uint32_t idx = 16;
     // This loop gets unrolled and there are no control dependences. Way faster than a break (but should watch for the avoidable loop-carried dep)
-    for (uint32_t i = startEntry; i < endEntry; i++) {
+    for (uint32_t i = 0; i < 16; i++) {
         bool match = (pageAddr == tag[i]);
         idx = match?  i : idx;  // ccmov, no branch
     }
 
     DBG("%s: 0x%lx page %lx pos %d", name.c_str(), req.lineAddr, pageAddr, pos);
 
-    if (idx == numBuffers) {  // entry miss
-        uint32_t cand = numBuffers;
+    if (idx == 16) {  // entry miss
+        uint32_t cand = 16;
         uint64_t candScore = -1;
         //uint64_t candScore = 0;
         for (uint32_t i = 0; i < 16; i++) {
-            if (array[i].lastCycle > reqCycle + 5000) continue;  // warm prefetches, not even a candidate
+            if (array[i].lastCycle > reqCycle + 500) continue;  // warm prefetches, not even a candidate
             /*uint64_t score = (reqCycle - array[i].lastCycle)*(3 - array[i].conf.counter());
             if (score > candScore) {
                 cand = i;
@@ -186,7 +109,7 @@ uint64_t StreamPrefetcher::access(MemReq& req) {
             }
         }
 
-        if (cand < numBuffers) {
+        if (cand < 16) {
             idx = cand;
             array[idx].alloc(reqCycle);
             array[idx].lastPos = pos;
@@ -211,23 +134,6 @@ uint64_t StreamPrefetcher::access(MemReq& req) {
             profHits.inc();
             if (shortPrefetch) profShortHits.inc();
             DBG("%s: pos %d prefetched on %ld, pf resp %ld, demand resp %ld, short %d", name.c_str(), pos, e.times[pos].startCycle, pfRespCycle, respCycle, shortPrefetch);
-
-            if (evRec && e.respEvents[pos]) {
-                initAcc();
-                // Link resp with PrefetchResponseEvent
-                assert(acc.respCycle <= respCycle);
-                assert(acc.endEvent);
-                DelayEvent* dDownEv = new (evRec) DelayEvent(respCycle - acc.respCycle);
-                dDownEv->setMinStartCycle(acc.respCycle);
-                DelayEvent* dEndEv = new (evRec) DelayEvent(0);
-                dEndEv->setMinStartCycle(respCycle);
-
-                acc.endEvent->addChild(dDownEv, evRec)->addChild(dEndEv, evRec);
-                e.respEvents[pos]->addChild(dEndEv, evRec);
-
-                acc.respCycle = respCycle;
-                acc.endEvent = dEndEv;
-            }
         }
 
         // 2. Update predictors, issue prefetches
@@ -244,66 +150,25 @@ uint64_t StreamPrefetcher::access(MemReq& req) {
                 }
                 DBG("%s: pos %d stride %d conf %d lastPrefetchPos %d prefetchPos %d fetchDepth %d", name.c_str(), pos, stride, e.conf.counter(), e.lastPrefetchPos, prefetchPos, fetchDepth);
 
-                auto issuePrefetch = [&](uint32_t prefetchPos) {
-                    DBG("issuing prefetch");
+                if (prefetchPos < 64 && !e.valid[prefetchPos]) {
                     MESIState state = I;
-                    MemReq pfReq = {req.lineAddr + prefetchPos - pos, GETS, req.childId, &state, reqCycle, req.childLock, state, req.srcId, MemReq::PREFETCH};
-                    uint64_t pfRespCycle = parent->access(pfReq);
-                    assert(state == I);  // prefetch access should not give us any permissions
-
+                    MemReq pfReq = {req.lineAddr + prefetchPos - pos, GETS, req.childId, &state, reqCycle, req.childLock, state, req.srcId, MemReq::PREFETCH, req.previous_instructions, req.coreId, MemReq::PREFETCH_TRACE};
+                    uint64_t pfRespCycle = parents[parentId]->access(pfReq);  // FIXME, might segfault
                     e.valid[prefetchPos] = true;
                     e.times[prefetchPos].fill(reqCycle, pfRespCycle);
-
-                    if (evRec) {  // create & connect weave-phase events
-                        DelayEvent* pfStartEv;
-                        PrefetchResponseEvent* pfEndEv = new (evRec) PrefetchResponseEvent(this, idx, prefetchPos, 0 /*FIXME: assign domain @ init*/);
-                        pfEndEv->setMinStartCycle(pfRespCycle);
-
-                        if (evRec->hasRecord()) {
-                            TimingRecord pfAcc = evRec->popRecord();
-                            assert(pfAcc.isValid());
-                            assert(pfAcc.reqCycle >= reqCycle);
-                            assert(pfAcc.respCycle <= pfRespCycle);
-                            pfStartEv = new (evRec) DelayEvent(pfAcc.reqCycle - reqCycle);
-                            pfStartEv->setMinStartCycle(reqCycle);
-                            pfStartEv->addChild(pfAcc.startEvent, evRec);
-
-                            DelayEvent* pfDownEv = new (evRec) DelayEvent(pfRespCycle - pfAcc.respCycle);
-                            pfDownEv->setMinStartCycle(pfAcc.respCycle);
-                            pfAcc.endEvent->addChild(pfDownEv, evRec)->addChild(pfEndEv, evRec);
-                        } else {
-                            pfStartEv = new (evRec) DelayEvent(pfRespCycle - reqCycle);
-                            pfStartEv->setMinStartCycle(reqCycle);
-                            pfStartEv->addChild(pfEndEv, evRec);
-                        }
-
-                        initAcc();
-                        assert(acc.isValid() && acc.reqCycle == reqCycle);
-
-                        // Connect prefetch to start event
-                        DelayEvent* startEv = new (evRec) DelayEvent(0);
-                        startEv->setMinStartCycle(reqCycle);
-                        startEv->addChild(acc.startEvent, evRec);
-                        startEv->addChild(pfStartEv, evRec);
-                        acc.startEvent = startEv;
-                        assert(acc.reqCycle == reqCycle);
-
-                        // Record the PrefetchEndEvent so that we can later connect it with prefetch-hit requests
-                        e.respEvents[prefetchPos] = pfEndEv;
-                    }
-                };
-
-                if (prefetchPos < 64 && !e.valid[prefetchPos]) {
-                    issuePrefetch(prefetchPos);
                     profPrefetches.inc();
 
                     if (shortPrefetch && fetchDepth < 8 && prefetchPos + stride < 64 && !e.valid[prefetchPos + stride]) {
                         prefetchPos += stride;
-                        issuePrefetch(prefetchPos);
+                        pfReq.lineAddr += stride;
+                        pfRespCycle = parents[parentId]->access(pfReq);
+                        e.valid[prefetchPos] = true;
+                        e.times[prefetchPos].fill(reqCycle, pfRespCycle);
                         profPrefetches.inc();
                         profDoublePrefetches.inc();
                     }
                     e.lastPrefetchPos = prefetchPos;
+                    assert(state == I);  // prefetch access should not give us any permissions
                 }
             } else {
                 profLowConfAccs.inc();
@@ -327,26 +192,198 @@ uint64_t StreamPrefetcher::access(MemReq& req) {
         e.lastPos = pos;
     }
 
-    if (acc.isValid()) evRec->pushRecord(acc);
-
     req.childId = origChildId;
     return respCycle;
 }
 
 // nop for now; do we need to invalidate our own state?
 uint64_t StreamPrefetcher::invalidate(const InvReq& req) {
-    return child->invalidate(req);
+    for(int i = 0; i < numchildren; i++){
+        children[i]->invalidate(req);
+    }
+    //return child->invalidate(req);
+    return 0;
 }
 
-void StreamPrefetcher::simulatePrefetchResponse(PrefetchResponseEvent* ev, uint64_t cycle) {
-    // Self-clean so future requests don't get linked to a stale event
-    DBG("[%s] PrefetchResponse %d/%d cycle %ld min %ld", name.c_str(), ev->idx, ev->prefetchPos, cycle, ev->getMinStartCycle());
-    assert(ev->idx < 16 && ev-> prefetchPos < 64);
-    auto& evPtr = array[ev->idx].respEvents[ev->prefetchPos];
-    // Guard avoids nullifying a pointer that changed before resp arrival (e.g., if entry was reused); this should be rare
-    if (evPtr == ev) {
-        evPtr = nullptr;
-    } else {
-        DBG("[%s] PrefetchResponse already changed (%p)", name.c_str(), evPtr);
+void AMPMPrefetcher::setParents(uint32_t _childId, const g_vector<MemObject*>& _parents, Network* network) {
+    childId = _childId;
+    printf("----[AMPMPrefetcher] Parents: %d\n",_parents.size());
+    //if (parents.size() != 1) panic("Must have one parent");
+    if (network) panic("Network not handled");
+    //parent = parents[0];
+    numparents = _parents.size();
+    for(int i = 0; i < numparents; i++){
+        parents.push_back(_parents[i]);
     }
 }
+
+void AMPMPrefetcher::setChildren(const g_vector<BaseCache*>& _children, Network* network) {
+    printf("---- Chidren: %d\n", _children.size());
+    if (_children.size() != 1) panic("Must have one children");
+    if (network) panic("Network not handled");
+    numchildren = _children.size();
+    for(int i = 0; i < numchildren; i++){
+        children.push_back(_children[i]);
+    }
+    //child = _children[0];
+}
+
+void AMPMPrefetcher::initStats(AggregateStat* parentStat) {
+    AggregateStat* s = new AggregateStat();
+    s->init(name.c_str(), "Prefetcher stats");
+    profAccesses.init("acc", "Accesses"); s->append(&profAccesses);
+    profPrefetches.init("pf", "Issued prefetches"); s->append(&profPrefetches);
+    profDoublePrefetches.init("dpf", "Issued double prefetches"); s->append(&profDoublePrefetches);
+    profPageHits.init("pghit", "Page/entry hit"); s->append(&profPageHits);
+    profHits.init("hit", "Prefetch buffer hits, short and full"); s->append(&profHits);
+    profShortHits.init("shortHit", "Prefetch buffer short hits"); s->append(&profShortHits);
+    profStrideSwitches.init("strideSwitches", "Predicted stride switches"); s->append(&profStrideSwitches);
+    profLowConfAccs.init("lcAccs", "Low-confidence accesses with no prefetches"); s->append(&profLowConfAccs);
+    parentStat->append(s);
+}
+
+
+uint64_t AMPMPrefetcher::invalidate(const InvReq& req) {
+    for(int i = 0; i < numchildren; i++){
+        children[i]->invalidate(req);
+    }
+    //return child->invalidate(req);
+    return 0;
+}
+
+// AMPM Prefetcher : https://github.com/charlab/dpc2/blob/master/dpc2sim/example_prefetchers/ampm_lite_prefetcher.c
+ // void l2_prefetcher_operate(unsigned long long int addr, unsigned long long int ip, int cache_hit)
+uint64_t AMPMPrefetcher::access(MemReq& req) {
+    // uncomment this line to see all the information available to make prefetch decisions
+    //printf("(0x%llx 0x%llx %d %d %d) ", addr, ip, cache_hit, get_l2_read_queue_occupancy(0), get_l2_mshr_occupancy(0));
+    uint32_t origChildId = req.childId;
+    req.childId = childId;
+
+    uint32_t parentId = getParentId(req.lineAddr);
+    if (req.type != GETS) return parents[parentId]->access(req); //other reqs ignored, including stores
+
+    profAccesses.inc();
+
+    uint64_t reqCycle = req.cycle;
+    uint64_t respCycle = parents[parentId]->access(req);
+
+    //Address pageAddr = req.lineAddr >> 6;
+    Address page = req.lineAddr >> 6;
+    uint32_t page_offset = req.lineAddr & (64-1);
+    DBG("%s: 0x%lx page %lx pos %d", name.c_str(), req.lineAddr, pageAddr, pos);
+
+    // check to see if we have a page hit
+    int page_index = -1;
+    int i;
+    for(i=0; i<AMPM_PAGE_COUNT; i++){
+        if(ampm_pages[i].page == page){
+            page_index = i;
+            break;
+        }
+    }
+
+    if(page_index == -1){
+        // the page was not found, so we must replace an old page with this new page
+        // find the oldest page
+        int lru_index = 0;
+        unsigned long long int lru_cycle = ampm_pages[lru_index].lru;
+        int i;
+        for(i=0; i<AMPM_PAGE_COUNT; i++){
+            if(ampm_pages[i].lru < lru_cycle){
+                lru_index = i;
+                lru_cycle = ampm_pages[lru_index].lru;
+            }
+        }
+        page_index = lru_index;
+
+        // reset the oldest page
+        ampm_pages[page_index].page = page;
+        for(i=0; i<64; i++){
+            ampm_pages[page_index].access_map[i] = 0;
+            ampm_pages[page_index].pf_map[i] = 0;
+        }
+    }
+
+    // update LRU
+    ampm_pages[page_index].lru = reqCycle; //get_current_cycle(0);
+
+    // mark the access map
+    ampm_pages[page_index].access_map[page_offset] = 1;
+
+    // positive prefetching
+    int count_prefetches = 0;
+    for(i=1; i<=16; i++){
+        int check_index1 = page_offset - i;
+        int check_index2 = page_offset - 2*i;
+        int pf_index = page_offset + i;
+
+        if(check_index2 < 0) break;
+        if(pf_index > 63) break;
+
+        if(count_prefetches >= PREFETCH_DEGREE) break;
+
+        // don't prefetch something that's already been demand accessed
+        if(ampm_pages[page_index].access_map[pf_index] == 1) continue;
+
+        // don't prefetch something that's alrady been prefetched
+        if(ampm_pages[page_index].pf_map[pf_index] == 1) continue;
+
+
+
+        if((ampm_pages[page_index].access_map[check_index1]==1) && (ampm_pages[page_index].access_map[check_index2]==1)){
+            // we found the stride repeated twice, so issue a prefetch
+
+            //unsigned long long int pf_address = (page<<12)+(pf_index<<6);
+            unsigned long long int pf_address = (page<<6)+(pf_index);
+
+                MESIState state = I;
+                MemReq pfReq = {pf_address, GETS, req.childId, &state, reqCycle, req.childLock, state, req.srcId, MemReq::PREFETCH, req.previous_instructions, req.coreId, MemReq::PREFETCH_TRACE};
+                uint64_t pfRespCycle = parents[parentId]->access(pfReq);  // FIXME, might segfault
+                ampm_pages[page_index].pf_map[pf_index] = 1;
+                count_prefetches++;
+                assert(state == I);  // prefetch access should not give us any permissions
+                profPrefetches.inc();
+        }
+    }
+
+    // negative prefetching
+    count_prefetches = 0;
+    for(i=1; i<=16; i++)
+    {
+        int check_index1 = page_offset + i;
+        int check_index2 = page_offset + 2*i;
+        int pf_index = page_offset - i;
+
+        if(check_index2 > 63) break;
+        if(pf_index < 0) break;
+        if(count_prefetches >= PREFETCH_DEGREE) break;
+
+        // don't prefetch something that's already been demand accessed
+        if(ampm_pages[page_index].access_map[pf_index] == 1) continue;
+
+        // don't prefetch something that's alrady been prefetched
+        if(ampm_pages[page_index].pf_map[pf_index] == 1) continue;
+
+        if((ampm_pages[page_index].access_map[check_index1]==1) &&
+                (ampm_pages[page_index].access_map[check_index2]==1)){
+            // we found the stride repeated twice, so issue a prefetch
+
+            //unsigned long long int pf_address = (page<<12)+(pf_index<<6);
+            unsigned long long int pf_address = (page<<6)+(pf_index);
+
+            MESIState state = I;
+            MemReq pfReq = {pf_address, GETS, req.childId, &state, reqCycle, req.childLock, state, req.srcId, MemReq::PREFETCH, req.previous_instructions, req.coreId, MemReq::PREFETCH_TRACE};
+            uint64_t pfRespCycle = parents[parentId]->access(pfReq);  // FIXME, might segfault
+            profPrefetches.inc();
+            ampm_pages[page_index].pf_map[pf_index] = 1;
+            count_prefetches++;
+        }
+    }
+    return respCycle;
+}
+
+
+
+
+
+

@@ -39,9 +39,16 @@ class NullCore : public Core {
 
     public:
         explicit NullCore(g_string& _name);
+        
+        // LOIS: TODO: offloaded code
+        void offloadFunction_begin() { }
+        void offloadFunction_end() { }
+        int get_offload_code() { return 0; }
+
         void initStats(AggregateStat* parentStat);
 
         uint64_t getInstrs() const {return instrs;}
+        uint64_t getOffloadInstrs() const {return 0;}
         uint64_t getPhaseCycles() const;
         uint64_t getCycles() const {return instrs; /*IPC=1*/ }
 
@@ -53,11 +60,13 @@ class NullCore : public Core {
     protected:
         inline void bbl(BblInfo* bblInstrs);
 
-        static void LoadFunc(THREADID tid, ADDRINT addr);
-        static void StoreFunc(THREADID tid, ADDRINT addr);
+        static void OffloadBegin(THREADID tid);
+        static void OffloadEnd(THREADID tid);
+        static void LoadFunc(THREADID tid, ADDRINT addr, UINT32 size);
+        static void StoreFunc(THREADID tid, ADDRINT addr, UINT32 size);
         static void BblFunc(THREADID tid, ADDRINT bblAddr, BblInfo* bblInfo);
-        static void PredLoadFunc(THREADID tid, ADDRINT addr, BOOL pred);
-        static void PredStoreFunc(THREADID tid, ADDRINT addr, BOOL pred);
+        static void PredLoadFunc(THREADID tid, ADDRINT addr, BOOL pred, UINT32 size);
+        static void PredStoreFunc(THREADID tid, ADDRINT addr, BOOL pred, UINT32 size);
 
         static void BranchFunc(THREADID, ADDRINT, BOOL, ADDRINT, ADDRINT) {}
 } ATTR_LINE_ALIGNED; //This needs to take up a whole cache line, or false sharing will be extremely frequent
